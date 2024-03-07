@@ -42,35 +42,59 @@ pub fn main() {
         Err(e) => panic!("Error loading image: {:?}", e),
     };
     let mut mario_sprites: Vec<Sprite> = Vec::new();
-    for block_y in (0..mario_world_jpeg.height()).step_by(MARIO_SPRITE_BLOCK_SIZE) {
-        for block_x in (0..mario_world_jpeg.width()).step_by(MARIO_SPRITE_BLOCK_SIZE) {
-            let mut pixels: Vec<Color> = vec![];
-            for y in 0..MARIO_SPRITE_BLOCK_SIZE {
-                for x in 0..MARIO_SPRITE_BLOCK_SIZE {
-                    if x + block_x >= mario_world_jpeg.width() as usize
-                        || y + block_y >= mario_world_jpeg.height() as usize
-                    {
-                        continue;
-                    }
-                    pixels.push(
-                        mario_world_jpeg.get_pixel((block_x + x) as u32, (block_y + y) as u32),
-                    );
-                }
+    for block_y in (0..mario_world_jpeg.height() - 16 - 1).step_by(MARIO_SPRITE_BLOCK_SIZE) {
+        let block_x = block_y;
+        let mut pixels: Vec<Color> = vec![];
+        for y in (0..MARIO_SPRITE_BLOCK_SIZE).rev() {
+            for x in 0..MARIO_SPRITE_BLOCK_SIZE {
+                pixels.push(mario_world_jpeg.get_pixel((block_x + x) as u32, (block_y + y) as u32));
             }
-            let sprite = Sprite {
-                x: block_x,
-                y: block_y,
-                pixels: pixels,
-            };
-            if sprite_is_in_vec(&sprite, &mario_sprites) {
-                println!("Sprite already in vec");
-                continue;
-            }
-            mario_sprites.push(sprite);
         }
+        let sprite = Sprite {
+            x: block_x,
+            y: block_y,
+            pixels: pixels,
+        };
+        if sprite_is_in_vec(&sprite, &mario_sprites) {
+            continue;
+        }
+        mario_sprites.push(sprite);
     }
+
     println!("Mario sprites: {:?}", mario_sprites.len());
     for sprite in mario_sprites.iter() {
         sprite.serialize_to_png("sprites");
+    }
+    let mario_character_spritesheet = Image::from_file_with_format(
+        include_bytes!("../sprites/Mario/MarioSprites.png"),
+        Some(ImageFormat::Png),
+    )
+    .unwrap();
+    let mut mario_character_sprites: Vec<Sprite> = Vec::new();
+    let block_x = 128;
+    let block_y = 128;
+    let mut pixels: Vec<Color> = vec![];
+    for x in 0..block_x {
+        for y in 0..block_y {
+            if x > mario_character_spritesheet.width() as usize
+                || y > mario_character_spritesheet.height() as usize
+            {
+                continue;
+            }
+            pixels.push(mario_character_spritesheet.get_pixel(x as u32, y as u32));
+        }
+    }
+    let sprite = Sprite {
+        x: 0,
+        y: 0,
+        pixels: pixels,
+    };
+    mario_character_sprites.push(sprite);
+    println!(
+        "Mario character sprites: {:?}",
+        mario_character_sprites.len()
+    );
+    for sprite in mario_character_sprites.iter() {
+        sprite.serialize_to_png("sprites/Mario");
     }
 }

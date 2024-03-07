@@ -1,48 +1,127 @@
-use core::hash;
-use std::collections::HashMap;
-
 use macroquad::prelude::Image;
 use macroquad::prelude::*;
-use std::fs::File;
-use std::io::BufWriter;
-
+pub mod preparation;
 const MARIO_SPRITE_BLOCK_SIZE: usize = 16;
+const MARIO_WORLD_SIZE: (u16, u16) = (430, 240);
+
 struct Sprite {
-    x: usize,
-    y: usize,
+    height: usize,
+    width: usize,
     pixels: Vec<Color>,
 }
-fn main() {
-    let mut mario_sprites: HashMap<Vec<Color>, Sprite> = HashMap::new();
-    let mario_world_jpeg = match Image::from_file_with_format(
-        include_bytes!("../sprites/SuperMarioBrosMap1-1.png"),
+const fn get_block_sprite() -> Sprite {
+    let image = Image::from_file_with_format(
+        include_bytes!("../sprites/sprite_0_208.png"),
         Some(ImageFormat::Png),
-    ) {
-        Ok(image) => image,
-        Err(e) => panic!("Error loading image: {:?}", e),
-    };
-    for block_y in (0..mario_world_jpeg.height()).step_by(MARIO_SPRITE_BLOCK_SIZE) {
-        for block_x in (0..mario_world_jpeg.width()).step_by(MARIO_SPRITE_BLOCK_SIZE) {
-            let mut pixels: Vec<Color> = vec![];
-            for y in 0..MARIO_SPRITE_BLOCK_SIZE {
-                for x in 0..MARIO_SPRITE_BLOCK_SIZE {
-                    if x + block_x >= mario_world_jpeg.width() as usize
-                        || y + block_y >= mario_world_jpeg.height() as usize
-                    {
-                        continue;
-                    }
-                    pixels.push(
-                        mario_world_jpeg.get_pixel((block_x + x) as u32, (block_y + y) as u32),
-                    );
-                }
-            }
-            let sprite = Sprite {
-                x: block_x,
-                y: block_y,
-                pixels: pixels,
-            };
-            mario_sprites.insert(format!("{}-{}", block_x, block_y), sprite);
+    )
+    .unwrap();
+    let mut pixels: Vec<Color> = vec![];
+    for y in 0..MARIO_SPRITE_BLOCK_SIZE {
+        for x in 0..MARIO_SPRITE_BLOCK_SIZE {
+            pixels.push(image.get_pixel(x as u32, y as u32));
         }
     }
-    println!("Mario sprites: {:?}", mario_sprites.len());
+    Sprite {
+        width: MARIO_SPRITE_BLOCK_SIZE,
+        height: MARIO_SPRITE_BLOCK_SIZE,
+        pixels,
+    }
+}
+const BLOCK_WALL_SPRITE: Sprite = get_block_sprite();
+
+#[derive(PartialEq)]
+enum BlockType {
+    Wall,
+    Ground,
+    MovementBlock,
+}
+#[derive(PartialEq)]
+enum EnemyType {
+    Goomba,
+    Koopa,
+}
+#[derive(PartialEq)]
+enum ObjectType {
+    Block(BlockType),
+    Enemy(EnemyType),
+    Player,
+    PowerUp,
+}
+
+struct Object {
+    x: u16,
+    y: u16,
+    sprite: Sprite,
+    object: ObjectType,
+    velocity: (i16, i16),
+}
+impl Object {
+    fn new(x: u16, y: u16, sprite: Sprite, object: ObjectType) -> Object {
+        Object {
+            x,
+            y,
+            sprite,
+            object,
+            velocity: (0, 0),
+        }
+    }
+    fn set_velocity(&mut self, velocity: (i16, i16)) {
+        self.velocity = velocity;
+    }
+    fn update(&mut self) {
+        self.x = (self.x as i16 + self.velocity.0) as u16;
+        self.y = (self.y as i16 + self.velocity.1) as u16;
+    }
+    fn draw(&self) {
+        for (i, pixel) in self.sprite.pixels.iter().enumerate() {
+            let x = (i % self.sprite.width) as u16 + self.x;
+            let y = (i / self.sprite.height) as u16 + self.y;
+            draw_rectangle(x as f32, y as f32, 1.0, 1.0, *pixel);
+        }
+    }
+}
+impl PartialEq for Object {
+    fn eq(&self, other: &Self) -> bool {
+        return self.x == other.x && self.y == other.y && self.object == other.object;
+    }
+}
+struct World {
+    height: u16,
+    width: u16,
+    objects: Vec<Object>,
+}
+impl World {
+    fn new(height: u16, width: u16) -> World {
+        World {
+            height,
+            width,
+            objects: Vec::new(),
+        }
+    }
+    fn add_object(&mut self, object: Object) {
+        self.objects.push(object);
+    }
+    fn remove_object(&mut self, object: Object) {
+        self.objects.retain(|x| x != &object);
+    }
+    fn update(&mut self) {}
+    fn draw(&self) {}
+}
+#[macroquad::main("Rustario Bros")]
+async fn main() {
+    preparation::main(); // Creates the sprites to be used
+    let mut world = World::new(MARIO_WORLD_SIZE.0, MARIO_WORLD_SIZE.1);
+    let block_obj = Object::new(
+        0,
+        0,
+        BLOCK_WALL_SPRITE,
+        ObjectType::Block(BlockType::Ground),
+    );
+    world.add_object(block_obj);
+    loop {
+        clear_background(BLACK);
+        world.update();
+        world.draw();
+        next_frame().await;
+    }
 }

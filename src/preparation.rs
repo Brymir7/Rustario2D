@@ -4,20 +4,21 @@ use std::fs::{create_dir_all, File};
 use std::io::Write;
 
 #[derive(Serialize, Deserialize)]
-struct TileData {
-    start_x: u32,
-    start_y: u32,
-    sprite_name: String,
+pub struct Tile {
+    pub start_x: u32,
+    pub start_y: u32,
+    pub sprite_name: String,
 }
+
 const TILE_SIZE: usize = 16;
+
 pub fn main() {
     let img_path = "level1.png";
     let img = image::open(img_path).expect("Failed to open image");
 
     let (img_width, img_height) = img.dimensions();
 
-    let mut tiles_map: Vec<(ImageBuffer<Rgba<u8>, Vec<u8>>, _)> =
-        Vec::<(ImageBuffer<Rgba<u8>, Vec<u8>>, _)>::new();
+    let mut tiles_map = Vec::<(ImageBuffer<Rgba<u8>, Vec<u8>>, String)>::new();
     let mut level_data = Vec::new();
 
     create_dir_all("leveldata").expect("Failed to create directory");
@@ -36,7 +37,7 @@ pub fn main() {
             let mut found = false;
             let mut sprite_name = String::new();
 
-            for (i, (existing_tile, existing_sprite_name)) in tiles_map.iter().enumerate() {
+            for (existing_tile, existing_sprite_name) in tiles_map.iter() {
                 if tiles_equal(&tile, existing_tile) {
                     found = true;
                     sprite_name = existing_sprite_name.clone();
@@ -50,7 +51,7 @@ pub fn main() {
                 tiles_map.push((tile.clone(), sprite_name.clone()));
             }
 
-            level_data.push(TileData {
+            level_data.push(Tile {
                 start_x: x,
                 start_y: y,
                 sprite_name,

@@ -3,14 +3,14 @@ use serde::{Deserialize, Serialize};
 use std::fs::{create_dir_all, File};
 use std::io::Write;
 
+use crate::mario_config::mario_config::MARIO_SPRITE_BLOCK_SIZE;
+
 #[derive(Serialize, Deserialize)]
 pub struct Tile {
     pub start_x: u32,
     pub start_y: u32,
     pub sprite_name: String,
 }
-
-const TILE_SIZE: usize = 16;
 
 pub fn main() {
     let img_path = "level1.png";
@@ -24,14 +24,14 @@ pub fn main() {
     create_dir_all("leveldata").expect("Failed to create directory");
     create_dir_all("sprites").expect("Failed to create directory");
 
-    for y in (0..img_height).step_by(TILE_SIZE) {
-        for x in (0..img_width).step_by(TILE_SIZE) {
+    for y in (0..img_height).step_by(MARIO_SPRITE_BLOCK_SIZE) {
+        for x in (0..img_width).step_by(MARIO_SPRITE_BLOCK_SIZE) {
             let tile = img
                 .view(
                     x,
                     y,
-                    TILE_SIZE.try_into().unwrap(),
-                    TILE_SIZE.try_into().unwrap(),
+                    MARIO_SPRITE_BLOCK_SIZE.try_into().unwrap(),
+                    MARIO_SPRITE_BLOCK_SIZE.try_into().unwrap(),
                 )
                 .to_image();
             let mut found = false;

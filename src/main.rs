@@ -1,5 +1,5 @@
 use macroquad::prelude::*;
-use mario_config::mario_config::MARIO_WORLD_SIZE;
+use mario_config::mario_config::{GRAVITY, MARIO_WORLD_SIZE};
 use preparation::Tile;
 use std::collections::HashMap;
 use std::fs::File;
@@ -30,7 +30,7 @@ lazy_static! {
     };
 }
 
-#[derive(Clone, PartialEq, Copy)]
+#[derive(Clone, PartialEq, Copy, Debug)]
 enum BlockType {
     Block,
     MovementBlock,
@@ -38,74 +38,90 @@ enum BlockType {
     PowerupBlock,
 }
 
-#[derive(PartialEq, Clone, Copy)]
+#[derive(PartialEq, Clone, Copy, Debug)]
 enum EnemyType {
     Goomba,
     Koopa,
 }
 
-#[derive(PartialEq, Clone, Copy)]
+#[derive(PartialEq, Clone, Copy, Debug)]
 enum ObjectType {
     Block(BlockType),
     Enemy(EnemyType),
     Player,
     PowerUp,
 }
-
+#[derive(Clone)]
 struct Object {
-    x: u16,
-    y: u16,
-    height: u16,
-    width: u16,
-    max_speed: Option<u16>,
+    pos: Vec2,
+    height: usize,
+    width: usize,
+    max_speed: Option<i32>,
     sprite: Texture2D,
     object_type: ObjectType,
-    velocity: (i16, i16),
+    velocity: Vec2,
 }
 
 impl Object {
     fn new(
-        x: u16,
-        y: u16,
+        x: usize,
+        y: usize,
         sprite: Texture2D,
-        max_speed: Option<u16>,
+        max_speed: Option<i32>,
         object_type: ObjectType,
     ) -> Object {
         Object {
-            x,
-            y,
-            height: sprite.height() as u16,
-            width: sprite.width() as u16,
+            pos: Vec2::new(x as f32, y as f32),
+            height: sprite.height() as usize,
+            width: sprite.width() as usize,
             max_speed: max_speed,
             sprite,
             object_type,
-            velocity: (0, 0),
+            velocity: Vec2::new(0.0, 0.0),
         }
     }
-    fn new_player(x: u16, y: u16, max_speed: u16, sprite: Texture2D) -> Object {
+    fn new_player(x: usize, y: usize, max_speed: i32, sprite: Texture2D) -> Object {
         Object {
-            x,
-            y,
-            height: sprite.height() as u16,
-            width: sprite.width() as u16,
+            pos: Vec2::new(x as f32, y as f32),
+            height: sprite.height() as usize,
+            width: sprite.width() as usize,
             max_speed: Some(max_speed),
             sprite,
             object_type: ObjectType::Player,
-            velocity: (0, 0),
+            velocity: Vec2::new(0.0, 0.0),
         }
     }
     fn update(&mut self) {
-        self.x = (self.x as i16 + self.velocity.0) as u16;
-        self.y = (self.y as i16 + self.velocity.1) as u16;
+        self.velocity = self.velocity + Vec2::new(0.0, GRAVITY as f32 * get_frame_time());
+        self.velocity.x *= 0.95;
+        self.pos = self.pos + self.velocity;
+        if self.pos.x < 0.0 {
+            self.pos.x = 0.0;
+        }
+        if self.pos.x + self.width as f32 > MARIO_WORLD_SIZE.width as f32 {
+            self.pos.x = MARIO_WORLD_SIZE.width as f32 - self.width as f32;
+        }
+        if self.pos.y < 0.0 {
+            self.pos.y = 0.0;
+        }
+        if self.pos.y + self.height as f32 > 196.0 as f32 {
+            self.pos.y = 196.0 - self.height as f32;
+            self.velocity.y = 0.0;
+        }
     }
-
-    fn draw(&self, camera_x: u16, camera_y: u16) {
-        if self.x < camera_x || self.y < camera_y {
+    fn add_horizontal_velocity(&mut self, velocity: f32) {
+        self.velocity.x += velocity as f32;
+        if let Some(max_speed) = self.max_speed {
+            self.velocity.x = self.velocity.x.clamp(-max_speed as f32, max_speed as f32);
+        }
+    }
+    fn draw(&self, camera_x: usize, camera_y: usize) {
+        if self.pos.x < camera_x as f32 || self.pos.y < camera_y as f32 {
             return;
         }
-        let x = self.x - camera_x;
-        let y = self.y - camera_y;
-        if x > MARIO_WORLD_SIZE.width || y > MARIO_WORLD_SIZE.height {
+        let x = self.pos.x - camera_x as f32;
+        let y = self.pos.y - camera_y as f32;
+        if x > MARIO_WORLD_SIZE.width as f32 || y > MARIO_WORLD_SIZE.height as f32 {
             return;
         }
         draw_texture(&self.sprite, x as f32, y as f32, WHITE);
@@ -114,19 +130,19 @@ impl Object {
 
 impl PartialEq for Object {
     fn eq(&self, other: &Self) -> bool {
-        self.x == other.x && self.y == other.y && self.object_type == other.object_type
+        self.pos == other.pos && self.object_type == other.object_type
     }
 }
 
 struct Camera {
-    x: u16,
-    y: u16,
-    width: u16,
-    height: u16,
+    x: usize,
+    y: usize,
+    width: usize,
+    height: usize,
 }
 
 impl Camera {
-    fn new(width: u16, height: u16) -> Camera {
+    fn new(width: usize, height: usize) -> Camera {
         Camera {
             x: 0,
             y: 0,
@@ -135,26 +151,33 @@ impl Camera {
         }
     }
 
-    fn update(&mut self, player_x: u16, player_y: u16) {
+    fn update(&mut self, player_x: usize, player_y: usize) {
         self.x = player_x.saturating_sub(self.width / 4);
-        self.y = player_y.saturating_sub(self.height / 2);
+        self.y = player_y.saturating_sub(self.height);
     }
 }
-
+#[derive(Debug)]
+struct ArrayIndex {
+    x: usize,
+    y: usize,
+}
 struct World {
-    height: u16,
-    width: u16,
-    objects: Vec<Object>,
+    height: usize,
+    width: usize,
+    objects: Vec<Vec<Vec<Object>>>, // in a single tile theres a background Object + potentially a player, powerup or enemy
+    player_index: ArrayIndex,
     camera: Camera,
 }
 
 impl World {
-    fn new(height: u16, width: u16) -> World {
+    fn new(height: usize, width: usize) -> World {
+        let objects = vec![vec![vec![]; (width / 16) as usize]; (height / 16) as usize];
         World {
             height,
             width,
-            objects: Vec::new(),
-            camera: Camera::new(width, height),
+            objects: objects,
+            camera: Camera::new(600, height),
+            player_index: ArrayIndex { x: 0, y: 0 },
         }
     }
     async fn load_level(&mut self) {
@@ -180,13 +203,13 @@ impl World {
                 sprite
             };
             let object_type = SPRITE_TYPE_MAPPING
-                .get(tile.sprite_name.as_str())
+                .get(tile.sprite_name.as_str().split("/").last().unwrap())
                 .cloned()
-                .unwrap_or(ObjectType::Block(BlockType::Block)); // Default to Block(Wall)
+                .unwrap_or(ObjectType::Block(BlockType::Background)); // Default to Block(Wall)
 
             let object = Object::new(
-                tile.start_x as u16,
-                tile.start_y as u16,
+                tile.start_x as usize,
+                tile.start_y as usize,
                 sprite,
                 None,
                 object_type,
@@ -201,39 +224,118 @@ impl World {
         let mut player_sprite = player_sprite.get_texture_data();
         image_utils::convert_white_to_transparent(&mut player_sprite);
         let player_sprite = Texture2D::from_image(&player_sprite);
-        let player = Object::new_player(48, 176, 2, player_sprite);
-        self.insert_player(player);
+        let player = Object::new_player(48, 176, 12, player_sprite);
+        self.player_index = ArrayIndex {
+            y: 176 / 16,
+            x: 48 / 16,
+        };
+        self.add_object(player);
     }
     fn add_object(&mut self, object: Object) {
-        self.objects.push(object);
-    }
-    fn insert_player(&mut self, player: Object) {
-        self.objects.insert(0, player);
+        let x = (object.pos.x / 16.0) as usize;
+        let y = (object.pos.y / 16.0) as usize;
+        if y > self.objects.len() - 1 || x > self.objects[y].len() - 1 {
+            println!("Object out of bounds at x: {}, y: {}", x, y);
+            return;
+        }
+        self.objects[y][x].push(object);
     }
     fn handle_input(&mut self) {
-        if let Some(player) = self.objects.first_mut() {
-            if is_key_down(KeyCode::A) {
-                player.x = player.x.saturating_sub(1);
-            } else if is_key_down(KeyCode::D) {
-                player.x = player.x.saturating_add(1);
+        let max_y_index = self.objects.len() - 1;
+        let max_x_index = self.objects[0].len() - 1;
+        let block_below_player_y_idx = self.player_index.y + 1;
+        let block_below_player_x_idx = self.player_index.x;
+        let objects_iter = self.objects.split_at_mut(block_below_player_y_idx);
+        let blocks_below_player = objects_iter.1;
+        let blocks_above = objects_iter.0;
+        if let Some(player) = blocks_above[self.player_index.y][self.player_index.x]
+            .iter_mut()
+            .find(|obj| matches!(obj.object_type, ObjectType::Player))
+        {
+            if is_key_down(KeyCode::Right) {
+                player.add_horizontal_velocity(3.0 * get_frame_time());
+            }
+            if is_key_down(KeyCode::Left) {
+                player.add_horizontal_velocity(-3.0 * get_frame_time());
+            }
+
+            if is_key_pressed(KeyCode::Space) {
+                if block_below_player_y_idx < max_y_index && block_below_player_x_idx < max_x_index
+                {
+                    let block_below_player = &mut blocks_below_player[0][block_below_player_x_idx];
+                    if block_below_player.is_empty() {
+                        return;
+                    }
+                    let block_below_player = &mut block_below_player[0];
+                    println!("{:?}", block_below_player.object_type);
+                    if matches!(
+                        block_below_player.object_type,
+                        ObjectType::Block(BlockType::Block)
+                            | ObjectType::Block(BlockType::PowerupBlock)
+                            | ObjectType::Block(BlockType::MovementBlock)
+                    ) {
+                        player.velocity.y = -5.0;
+                    }
+                }
             }
         }
     }
     fn update(&mut self) {
-        for object in &mut self.objects {
-            object.update();
+        let prev_x = self.player_index.x;
+        let prev_y = self.player_index.y;
+        let new_x;
+        let new_y;
+        {
+            let player = self.objects[prev_y][prev_x]
+                .iter_mut()
+                .find(|obj| matches!(obj.object_type, ObjectType::Player))
+                .expect("Player not found");
+            player.update();
+            new_x = (player.pos.x / 16.0) as usize;
+            new_y = (player.pos.y / 16.0) as usize;
         }
-        if let Some(player) = self.objects.first() {
-            self.camera.update(player.x, player.y);
+        if new_x != prev_x || new_y != prev_y {
+            if new_y < self.objects.len() && new_x < self.objects[new_y].len() {
+                let block_intersect = self.objects[new_y][new_x].iter().any(|obj| {
+                    matches!(
+                        obj.object_type,
+                        ObjectType::Block(BlockType::Block)
+                            | ObjectType::Block(BlockType::MovementBlock)
+                            | ObjectType::Block(BlockType::PowerupBlock)
+                    )
+                });
+
+                if !block_intersect {
+                    let player_pos = self.objects[prev_y][prev_x]
+                        .iter()
+                        .position(|obj| matches!(obj.object_type, ObjectType::Player))
+                        .expect("Player not found");
+                    let player = self.objects[prev_y][prev_x].remove(player_pos);
+                    self.objects[new_y][new_x].push(player);
+                    self.player_index = ArrayIndex { x: new_x, y: new_y };
+                } else {
+                    let player = self.objects[prev_y][prev_x]
+                        .iter_mut()
+                        .find(|obj| matches!(obj.object_type, ObjectType::Player))
+                        .expect("Player not found");
+                    player.pos = Vec2::new(prev_x as f32 * 16.0, prev_y as f32 * 16.0);
+                }
+            }
         }
     }
 
     fn draw(&self) {
-        let (player, other_objects) = self.objects.split_at(1);
-        for object in other_objects {
-            object.draw(self.camera.x, self.camera.y);
+        for row in self.objects.iter() {
+            for cell in row.iter() {
+                for object in cell.iter() {
+                    object.draw(self.camera.x, self.camera.y);
+                }
+            }
         }
-        if let Some(player) = player.first() {
+        if let Some(player) = self.objects[self.player_index.y][self.player_index.x]
+            .iter()
+            .find(|obj| matches!(obj.object_type, ObjectType::Player))
+        {
             player.draw(self.camera.x, self.camera.y);
         }
     }
@@ -245,11 +347,11 @@ async fn main() {
     println!("Finished preparing level data");
 
     let mut world = World::new(MARIO_WORLD_SIZE.height, MARIO_WORLD_SIZE.width);
-    world.load_player().await;
-    world.load_level().await;
 
+    world.load_level().await;
+    world.load_player().await;
     println!("Finished loading level");
-    request_new_screen_size(world.width as f32, world.height as f32);
+    request_new_screen_size(600.0, world.height as f32);
 
     loop {
         clear_background(BLACK);

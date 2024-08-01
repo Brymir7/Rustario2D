@@ -7,21 +7,44 @@ use std::io::Read;
 pub mod image_utils;
 pub mod mario_config;
 pub mod preparation;
+use lazy_static::lazy_static;
+lazy_static! {
+    static ref SPRITE_TYPE_MAPPING: HashMap<&'static str, ObjectType> = {
+        let mut m = HashMap::new();
+        m.insert("9.png", ObjectType::Block(BlockType::PowerupBlock));
+        m.insert("10.png", ObjectType::Block(BlockType::Block));
+        m.insert("11.png", ObjectType::Block(BlockType::Block));
+        m.insert("12.png", ObjectType::Block(BlockType::Block));
+        m.insert("13.png", ObjectType::Block(BlockType::Block));
+        m.insert("14.png", ObjectType::Block(BlockType::Block));
+        m.insert("15.png", ObjectType::Block(BlockType::Block));
+        m.insert("16.png", ObjectType::Block(BlockType::Block));
+        m.insert("17.png", ObjectType::Block(BlockType::Block));
+        m.insert("19.png", ObjectType::Block(BlockType::Block));
+        m.insert("20.png", ObjectType::Block(BlockType::Block));
+        m.insert("21.png", ObjectType::Block(BlockType::Block));
+        m.insert("23.png", ObjectType::Block(BlockType::Block));
+        m.insert("25.png", ObjectType::Block(BlockType::Block));
+        m.insert("31.png", ObjectType::Block(BlockType::Block));
+        m
+    };
+}
 
 #[derive(Clone, PartialEq, Copy)]
 enum BlockType {
-    Wall,
-    Ground,
+    Block,
     MovementBlock,
+    Background,
+    PowerupBlock,
 }
 
-#[derive(PartialEq)]
+#[derive(PartialEq, Clone, Copy)]
 enum EnemyType {
     Goomba,
     Koopa,
 }
 
-#[derive(PartialEq)]
+#[derive(PartialEq, Clone, Copy)]
 enum ObjectType {
     Block(BlockType),
     Enemy(EnemyType),
@@ -112,9 +135,9 @@ impl Camera {
         }
     }
 
-    fn update(&mut self, player_x: u16, player_y: u16, world_width: u16, world_height: u16) {
-        self.x = player_x;
-        self.y = player_y;
+    fn update(&mut self, player_x: u16, player_y: u16) {
+        self.x = player_x.saturating_sub(self.width / 4);
+        self.y = player_y.saturating_sub(self.height / 2);
     }
 }
 
@@ -156,13 +179,17 @@ impl World {
                 sprites_cache.insert(tile.sprite_name.clone(), sprite.clone());
                 sprite
             };
+            let object_type = SPRITE_TYPE_MAPPING
+                .get(tile.sprite_name.as_str())
+                .cloned()
+                .unwrap_or(ObjectType::Block(BlockType::Block)); // Default to Block(Wall)
 
             let object = Object::new(
                 tile.start_x as u16,
                 tile.start_y as u16,
                 sprite,
                 None,
-                ObjectType::Block(BlockType::Wall), // Adjust ObjectType as needed
+                object_type,
             );
             self.add_object(object);
         }
@@ -174,7 +201,7 @@ impl World {
         let mut player_sprite = player_sprite.get_texture_data();
         image_utils::convert_white_to_transparent(&mut player_sprite);
         let player_sprite = Texture2D::from_image(&player_sprite);
-        let player = Object::new_player(50, 190, 2, player_sprite);
+        let player = Object::new_player(48, 176, 2, player_sprite);
         self.insert_player(player);
     }
     fn add_object(&mut self, object: Object) {
@@ -197,8 +224,7 @@ impl World {
             object.update();
         }
         if let Some(player) = self.objects.first() {
-            self.camera
-                .update(player.x, player.y, self.width, self.height);
+            self.camera.update(player.x, player.y);
         }
     }
 
@@ -216,7 +242,8 @@ impl World {
 #[macroquad::main("Rustario Bros")]
 async fn main() {
     preparation::main();
-    println!("Finished preparation");
+    println!("Finished preparing level data");
+
     let mut world = World::new(MARIO_WORLD_SIZE.height, MARIO_WORLD_SIZE.width);
     world.load_player().await;
     world.load_level().await;

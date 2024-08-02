@@ -10,6 +10,8 @@ pub mod image_utils;
 pub mod mario_config;
 pub mod preparation;
 use lazy_static::lazy_static;
+const PHYSICS_FRAME_PER_SECOND: f32 = 60.0;
+const PHYSICS_FRAME_TIME: f32 = 1.0 / PHYSICS_FRAME_PER_SECOND;
 const DIRECTIONS: [(isize, isize); 8] = [
     (-1, 0),
     (0, -1),
@@ -20,6 +22,7 @@ const DIRECTIONS: [(isize, isize); 8] = [
     (1, -1),
     (-1, 1),
 ];
+
 lazy_static! {
     static ref SPRITE_TYPE_MAPPING: HashMap<&'static str, ObjectType> = {
         let mut m = HashMap::new();
@@ -62,134 +65,29 @@ enum ObjectType {
     Player,
     PowerUp,
 }
+
 #[derive(Clone)]
 struct Object {
     pos: Vec2,
     height: usize,
     width: usize,
-    max_speed: Option<i32>,
     sprite: Texture2D,
     object_type: ObjectType,
-    velocity: Vec2,
 }
 
 impl Object {
-    fn new(
-        x: usize,
-        y: usize,
-        sprite: Texture2D,
-        max_speed: Option<i32>,
-        object_type: ObjectType,
-    ) -> Object {
+    fn new(x: usize, y: usize, sprite: Texture2D, object_type: ObjectType) -> Object {
         Object {
             pos: Vec2::new(x as f32, y as f32),
             height: sprite.height() as usize,
             width: sprite.width() as usize,
-            max_speed: max_speed,
             sprite,
             object_type,
-            velocity: Vec2::new(0.0, 0.0),
-        }
-    }
-    fn new_player(x: usize, y: usize, max_speed: i32, sprite: Texture2D) -> Object {
-        Object {
-            pos: Vec2::new(x as f32, y as f32),
-            height: sprite.height() as usize,
-            width: sprite.width() as usize,
-            max_speed: Some(max_speed),
-            sprite,
-            object_type: ObjectType::Player,
-            velocity: Vec2::new(0.0, 0.0),
-        }
-    }
-    fn apply_gravity(&mut self) {
-        self.velocity.y += GRAVITY as f32 * get_frame_time();
-    }
-    fn update(&mut self, surrounding_objects: Vec<Object>) {
-        let block_below = surrounding_objects.iter().find(|obj| {
-            obj.pos.y > self.pos.y && obj.object_type == ObjectType::Block(BlockType::Block)
-        });
-        if block_below.is_none() {
-            self.apply_gravity();
-        }
-        self.velocity.x *= 0.98;
-        self.pos = self.pos + self.velocity;
-        for obj in &surrounding_objects {
-            match obj.object_type {
-                ObjectType::Block(BlockType::Block) => {
-                    self.check_and_handle_collision(obj);
-                }
-                ObjectType::Block(BlockType::PowerupBlock) => {
-                    self.check_and_handle_collision(obj);
-                }
-                _ => {}
-            }
-        }
-
-        self.pos.x = self
-            .pos
-            .x
-            .clamp(0.0, MARIO_WORLD_SIZE.width as f32 - self.width as f32);
-        self.pos.y = self
-            .pos
-            .y
-            .clamp(0.0, MARIO_WORLD_SIZE.height as f32 - self.height as f32);
-    }
-
-    fn check_and_handle_collision(&mut self, other: &Object) {
-        let self_center = Vec2::new(
-            self.pos.x + self.width as f32 / 2.0,
-            self.pos.y + self.height as f32 / 2.0,
-        );
-        let other_center = Vec2::new(
-            other.pos.x + other.width as f32 / 2.0,
-            other.pos.y + other.height as f32 / 2.0,
-        );
-        let x_overlap =
-            (self.width as f32 + other.width as f32) / 2.0 - (self_center.x - other_center.x).abs();
-        let y_overlap = (self.height as f32 + other.height as f32) / 2.0
-            - (self_center.y - other_center.y).abs();
-
-        if x_overlap > 0.0 && y_overlap > 0.0 {
-            let y_collision_threshold = 0.2;
-            if y_overlap < self.height as f32 * y_collision_threshold {
-                if self_center.y < other_center.y {
-                    self.pos.y -= y_overlap;
-                    self.velocity.y = 0.0;
-                } else {
-                    self.pos.y += y_overlap;
-                    self.velocity.y = 0.0;
-                }
-            } else {
-                if x_overlap < y_overlap {
-                    if self_center.x < other_center.x {
-                        self.pos.x -= x_overlap;
-                        self.velocity.x = 0.0;
-                    } else {
-                        self.pos.x += x_overlap;
-                        self.velocity.x = 0.0;
-                    }
-                } else {
-                    if self_center.y < other_center.y {
-                        self.pos.y -= y_overlap;
-                        self.velocity.y = 0.0;
-                    } else {
-                        self.pos.y += y_overlap;
-                        self.velocity.y = 0.0;
-                    }
-                }
-            }
         }
     }
 
-    fn add_horizontal_velocity(&mut self, velocity: f32) {
-        self.velocity.x += velocity as f32;
-        if let Some(max_speed) = self.max_speed {
-            self.velocity.x = self.velocity.x.clamp(-max_speed as f32, max_speed as f32);
-        }
-    }
     fn draw(&self, camera_x: usize, camera_y: usize) {
-        if self.pos.x < camera_x as f32 || self.pos.y < camera_y as f32 {
+        if self.pos.x < camera_x as f32 - 32.0 || self.pos.y < camera_y as f32 {
             return;
         }
         let x = self.pos.x - camera_x as f32;
@@ -204,6 +102,133 @@ impl Object {
 impl PartialEq for Object {
     fn eq(&self, other: &Self) -> bool {
         self.pos == other.pos && self.object_type == other.object_type
+    }
+}
+
+struct Player {
+    object: Object,
+    max_speed: i32,
+    velocity: Vec2,
+    is_grounded: bool,
+}
+
+impl Player {
+    fn new(x: usize, y: usize, max_speed: i32, sprite: Texture2D) -> Player {
+        Player {
+            object: Object::new(x, y, sprite, ObjectType::Player),
+            max_speed,
+            velocity: Vec2::new(0.0, 0.0),
+            is_grounded: false,
+        }
+    }
+
+    fn apply_gravity(&mut self) {
+        self.velocity.y += GRAVITY as f32 * PHYSICS_FRAME_TIME;
+    }
+    fn apply_x_axis_friction(&mut self) {
+        self.velocity.x =
+            (self.velocity.x.abs() - 2.0 * PHYSICS_FRAME_TIME) * self.velocity.x.signum();
+    }
+    fn update(&mut self, surrounding_objects: Vec<Object>) {
+        println!(
+            "Surrounding object types {:?}",
+            surrounding_objects
+                .iter()
+                .map(|obj| obj.object_type)
+                .collect::<Vec<_>>()
+        );
+        let self_center_x = self.object.pos.x + self.object.width as f32 / 2.0;
+        let block_below = surrounding_objects.iter().find(|obj| {
+            obj.pos.y > self.object.pos.y
+                && obj.pos.x < self_center_x
+                && obj.pos.x + obj.width as f32 > self_center_x
+                && matches!(
+                    obj.object_type,
+                    ObjectType::Block(BlockType::Block)
+                        | ObjectType::Block(BlockType::PowerupBlock)
+                        | ObjectType::Block(BlockType::MovementBlock)
+                )
+        });
+
+        if block_below.is_none() {
+            self.apply_gravity();
+            self.is_grounded = false;
+        } else {
+            self.is_grounded = true;
+            self.apply_x_axis_friction();
+        }
+        self.object.pos += self.velocity;
+        for object in surrounding_objects.iter() {
+            if object.object_type == ObjectType::Block(BlockType::Block)
+                || object.object_type == ObjectType::Block(BlockType::PowerupBlock)
+            {
+                self.check_and_handle_collision(object);
+            }
+        }
+    }
+    fn check_and_handle_collision(&mut self, other: &Object) {
+        let self_center = Vec2::new(
+            self.object.pos.x + self.object.width as f32 / 2.0,
+            self.object.pos.y + self.object.height as f32 / 2.0,
+        );
+        let other_center = Vec2::new(
+            other.pos.x + other.width as f32 / 2.0,
+            other.pos.y + other.height as f32 / 2.0,
+        );
+        let x_overlap = (self.object.width as f32 + other.width as f32) / 2.0
+            - (self_center.x - other_center.x).abs();
+        let y_overlap = (self.object.height as f32 + other.height as f32) / 2.0
+            - (self_center.y - other_center.y).abs();
+
+        if x_overlap > 0.0 && y_overlap > 0.0 {
+            let y_collision_threshold = 0.2;
+            if y_overlap < self.object.height as f32 * y_collision_threshold {
+                if self_center.y < other_center.y {
+                    self.object.pos.y -= y_overlap;
+                    self.velocity.y = 0.0;
+                } else {
+                    self.object.pos.y += y_overlap;
+                    self.velocity.y = 0.0;
+                }
+            } else {
+                if x_overlap < y_overlap {
+                    if self_center.x < other_center.x {
+                        self.object.pos.x -= x_overlap;
+                        self.velocity.x = 0.0;
+                    } else {
+                        self.object.pos.x += x_overlap;
+                        self.velocity.x = 0.0;
+                    }
+                } else {
+                    if self_center.y < other_center.y {
+                        self.object.pos.y -= y_overlap;
+                        self.velocity.y = 0.0;
+                    } else {
+                        self.object.pos.y += y_overlap;
+                        self.velocity.y = 0.0;
+                    }
+                }
+            }
+        }
+    }
+    fn add_horizontal_velocity(&mut self, velocity: f32) {
+        self.velocity.x += velocity;
+        self.velocity.x = self
+            .velocity
+            .x
+            .clamp(-self.max_speed as f32, self.max_speed as f32);
+    }
+
+    fn add_vertical_velocity(&mut self, velocity: f32) {
+        if self.is_grounded {
+            self.velocity.y = -3.0;
+            self.is_grounded = false;
+        }
+        self.velocity.y += velocity;
+    }
+
+    fn draw(&self, camera_x: usize, camera_y: usize) {
+        self.object.draw(camera_x, camera_y);
     }
 }
 
@@ -229,17 +254,14 @@ impl Camera {
         self.y = player_y.saturating_sub(self.height);
     }
 }
-#[derive(Debug, Clone, Copy)]
-struct ArrayIndex {
-    x: usize,
-    y: usize,
-}
+
 struct World {
     height: usize,
     width: usize,
-    objects: Vec<Vec<Vec<Object>>>, // in a single tile theres a background Object + potentially a player, powerup or enemy
-    player_index: ArrayIndex,
+    objects: Vec<Vec<Vec<Object>>>,
+    player: Player,
     camera: Camera,
+    game_over: bool,
 }
 
 impl World {
@@ -248,11 +270,13 @@ impl World {
         World {
             height,
             width,
-            objects: objects,
+            objects,
+            player: Player::new(48, 176, 25, Texture2D::empty()), // Temporary empty texture
             camera: Camera::new(600, height),
-            player_index: ArrayIndex { x: 0, y: 0 },
+            game_over: false,
         }
     }
+
     async fn load_level(&mut self) {
         let mut level_data_file =
             File::open("leveldata/level_data.json").expect("Failed to open level data file");
@@ -278,18 +302,18 @@ impl World {
             let object_type = SPRITE_TYPE_MAPPING
                 .get(tile.sprite_name.as_str().split("/").last().unwrap())
                 .cloned()
-                .unwrap_or(ObjectType::Block(BlockType::Background)); // Default to Block(Wall)
+                .unwrap_or(ObjectType::Block(BlockType::Background));
 
             let object = Object::new(
                 tile.start_x as usize,
                 tile.start_y as usize,
                 sprite,
-                None,
                 object_type,
             );
             self.add_object(object);
         }
     }
+
     async fn load_player(&mut self) {
         let player_sprite = load_texture("sprites/Mario.png")
             .await
@@ -297,13 +321,9 @@ impl World {
         let mut player_sprite = player_sprite.get_texture_data();
         image_utils::convert_white_to_transparent(&mut player_sprite);
         let player_sprite = Texture2D::from_image(&player_sprite);
-        let player = Object::new_player(48, 160, 12, player_sprite);
-        self.player_index = ArrayIndex {
-            y: (160.0) as usize / 16,
-            x: (48.0) as usize / 16,
-        };
-        self.add_object(player);
+        self.player = Player::new(48, 176, 40, player_sprite);
     }
+
     fn add_object(&mut self, object: Object) {
         let x = (object.pos.x / 16.0) as usize;
         let y = (object.pos.y / 16.0) as usize;
@@ -313,87 +333,68 @@ impl World {
         }
         self.objects[y][x].push(object);
     }
+
     fn handle_input(&mut self) {
-        if let Some(player) = self.objects[self.player_index.y][self.player_index.x]
-            .iter_mut()
-            .find(|obj| matches!(obj.object_type, ObjectType::Player))
-        {
-            if is_key_down(KeyCode::Right) {
-                player.add_horizontal_velocity(5.0 * get_frame_time());
-            }
-            if is_key_down(KeyCode::Left) {
-                player.add_horizontal_velocity(-5.0 * get_frame_time());
-            }
-
-            if is_key_pressed(KeyCode::Space) {
-                player.velocity.y = -3.0;
-            }
+        const ACCELERATION: f32 = 3.0;
+        const JUMP_STRENGTH: f32 = 12.0;
+        if is_key_down(KeyCode::Right) || is_key_down(KeyCode::D) {
+            self.player
+                .add_horizontal_velocity(ACCELERATION * PHYSICS_FRAME_TIME);
+        }
+        if is_key_down(KeyCode::Left) || is_key_down(KeyCode::A) {
+            self.player
+                .add_horizontal_velocity(-ACCELERATION * PHYSICS_FRAME_TIME);
+        }
+        if is_key_down(KeyCode::Space) {
+            self.player
+                .add_vertical_velocity(-JUMP_STRENGTH * PHYSICS_FRAME_TIME);
         }
     }
+
     fn update(&mut self) {
-        let objects_clone = self.objects.clone();
-        let old_player_idx = self.player_index;
-        for row in self.objects.iter_mut() {
-            for cell in row.iter_mut() {
-                for object in cell.iter_mut() {
-                    match object.object_type {
-                        ObjectType::Player => {
-                            let surrounding_objects: Vec<_> = DIRECTIONS
-                                .iter()
-                                .filter_map(|(dy, dx)| {
-                                    let new_y = self.player_index.y as isize + *dy;
-                                    let new_x = self.player_index.x as isize + *dx;
-                                    if new_y >= 0
-                                        && new_y < objects_clone.len() as isize
-                                        && new_x >= 0
-                                        && new_x < objects_clone[0].len() as isize
-                                    {
-                                        Some(&objects_clone[new_y as usize][new_x as usize])
-                                    } else {
-                                        None
-                                    }
-                                })
-                                .flatten()
-                                .cloned()
-                                .collect();
-                            object.update(surrounding_objects);
-                            self.player_index.x = (object.pos.x / 16.0) as usize;
-                            self.player_index.y = (object.pos.y / 16.0) as usize;
-                        }
-                        _ => {}
-                    }
+        let surrounding_objects: Vec<_> = DIRECTIONS
+            .iter()
+            .filter_map(|(dy, dx)| {
+                let new_y = (self.player.object.pos.y / 16.0).round() as isize + *dy;
+                let new_x = (self.player.object.pos.x / 16.0).round() as isize + *dx;
+
+                if new_y >= 0
+                    && new_y < self.objects.len() as isize
+                    && new_x >= 0
+                    && new_x < self.objects[0].len() as isize
+                {
+                    Some(self.objects[new_y as usize][new_x as usize].clone())
+                } else {
+                    None
                 }
-            }
-        }
-        if old_player_idx.x != self.player_index.x || old_player_idx.y != self.player_index.y {
-            let player_object = self.objects[old_player_idx.y][old_player_idx.x]
-                .iter()
-                .find(|obj| matches!(obj.object_type, ObjectType::Player))
-                .cloned();
+            })
+            .flatten()
+            .collect();
 
-            if let Some(player) = player_object {
-                self.objects[old_player_idx.y][old_player_idx.x]
-                    .retain(|obj| !matches!(obj.object_type, ObjectType::Player));
-                self.objects[self.player_index.y][self.player_index.x].push(player);
-            }
-        }
+        self.player.update(surrounding_objects);
         self.camera.update(
-            self.objects[self.player_index.y][self.player_index.x]
-                .iter()
-                .find(|obj| matches!(obj.object_type, ObjectType::Player))
-                .unwrap()
-                .pos
-                .x as usize,
-            self.objects[self.player_index.y][self.player_index.x]
-                .iter()
-                .find(|obj| matches!(obj.object_type, ObjectType::Player))
-                .unwrap()
-                .pos
-                .y as usize,
+            self.player.object.pos.x as usize,
+            self.player.object.pos.y as usize,
         );
+        self.check_player_in_bounds_or_game_over();
     }
-
+    fn check_player_in_bounds_or_game_over(&mut self) {
+        if self.player.object.pos.y > self.height as f32 {
+            self.game_over = true;
+        }
+        if self.player.object.pos.x > self.width as f32 {
+            self.game_over = true;
+        }
+        if self.player.object.pos.x < 0.0 {
+            self.player.object.pos.x = 0.0;
+        }
+    }
     fn draw(&self) {
+        if self.game_over {
+            clear_background(BLACK);
+            draw_text("Game Over", 100.0, 100.0, 30.0, RED);
+            return;
+        }
         for row in self.objects.iter() {
             for cell in row.iter() {
                 for object in cell.iter() {
@@ -401,14 +402,10 @@ impl World {
                 }
             }
         }
-        if let Some(player) = self.objects[self.player_index.y][self.player_index.x]
-            .iter()
-            .find(|obj| matches!(obj.object_type, ObjectType::Player))
-        {
-            player.draw(self.camera.x, self.camera.y);
-        }
+        self.player.draw(self.camera.x, self.camera.y);
     }
 }
+
 fn window_conf() -> Conf {
     Conf {
         window_title: "Rustario Bros".to_owned(),
@@ -421,6 +418,7 @@ fn window_conf() -> Conf {
         ..Default::default()
     }
 }
+
 #[macroquad::main(window_conf)]
 async fn main() {
     preparation::main();
@@ -433,12 +431,18 @@ async fn main() {
     println!("Finished loading level");
     request_new_screen_size(600.0, world.height as f32);
 
+    let mut elapsed_time = 0.0;
+    let target_time_step = 1.0 / PHYSICS_FRAME_PER_SECOND;
+
     loop {
         clear_background(BLACK);
-        world.handle_input();
-        world.update();
+        elapsed_time += get_frame_time();
+        while elapsed_time >= target_time_step {
+            world.handle_input();
+            world.update();
+            elapsed_time -= target_time_step;
+        }
         world.draw();
         next_frame().await;
-        sleep(Duration::from_millis(16));
     }
 }

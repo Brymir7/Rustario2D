@@ -10,7 +10,16 @@ pub mod image_utils;
 pub mod mario_config;
 pub mod preparation;
 use lazy_static::lazy_static;
-const DIRECTIONS: [(isize, isize); 4] = [(-1, 0), (0, -1), (0, 1), (1, 0)];
+const DIRECTIONS: [(isize, isize); 8] = [
+    (-1, 0),
+    (0, -1),
+    (0, 1),
+    (1, 0),
+    (1, 1),
+    (-1, -1),
+    (1, -1),
+    (-1, 1),
+];
 lazy_static! {
     static ref SPRITE_TYPE_MAPPING: HashMap<&'static str, ObjectType> = {
         let mut m = HashMap::new();
@@ -405,12 +414,10 @@ fn window_conf() -> Conf {
         window_title: "Rustario Bros".to_owned(),
         window_width: 600,
         window_height: 400,
-        // Set the desired fps here
         window_resizable: false,
         high_dpi: true,
         fullscreen: false,
         sample_count: 1,
-
         ..Default::default()
     }
 }
@@ -432,5 +439,6 @@ async fn main() {
         world.update();
         world.draw();
         next_frame().await;
+        sleep(Duration::from_millis(16));
     }
 }

@@ -4,6 +4,8 @@ use preparation::Tile;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::Read;
+use std::thread::sleep;
+use std::time::Duration;
 pub mod image_utils;
 pub mod mario_config;
 pub mod preparation;
@@ -24,7 +26,6 @@ lazy_static! {
         m.insert("19.png", ObjectType::Block(BlockType::Block));
         m.insert("20.png", ObjectType::Block(BlockType::Block));
         m.insert("21.png", ObjectType::Block(BlockType::Block));
-        m.insert("23.png", ObjectType::Block(BlockType::Block));
         m.insert("25.png", ObjectType::Block(BlockType::Block));
         m.insert("31.png", ObjectType::Block(BlockType::Block));
         m
@@ -92,23 +93,30 @@ impl Object {
             velocity: Vec2::new(0.0, 0.0),
         }
     }
+    fn apply_gravity(&mut self) {
+        self.velocity.y += GRAVITY as f32 * get_frame_time();
+    }
     fn update(&mut self, surrounding_objects: Vec<Object>) {
-        self.velocity = self.velocity + Vec2::new(0.0, GRAVITY as f32 * get_frame_time());
+        let block_below = surrounding_objects.iter().find(|obj| {
+            obj.pos.y > self.pos.y && obj.object_type == ObjectType::Block(BlockType::Block)
+        });
+        if block_below.is_none() {
+            self.apply_gravity();
+        }
         self.velocity.x *= 0.98;
-
-        let new_pos = self.pos + self.velocity;
+        self.pos = self.pos + self.velocity;
         for obj in &surrounding_objects {
             match obj.object_type {
                 ObjectType::Block(BlockType::Block) => {
-                    self.resolve_collision(obj);
+                    self.check_and_handle_collision(obj);
                 }
                 ObjectType::Block(BlockType::PowerupBlock) => {
-                    self.resolve_collision(obj);
+                    self.check_and_handle_collision(obj);
                 }
                 _ => {}
             }
         }
-        self.pos = new_pos;
+
         self.pos.x = self
             .pos
             .x
@@ -119,44 +127,52 @@ impl Object {
             .clamp(0.0, MARIO_WORLD_SIZE.height as f32 - self.height as f32);
     }
 
-    fn resolve_collision(&mut self, other: &Object) {
-        let self_rect = Rect::new(
-            self.pos.x + self.velocity.x,
-            self.pos.y + self.velocity.y,
-            self.width as f32,
-            self.height as f32,
+    fn check_and_handle_collision(&mut self, other: &Object) {
+        let self_center = Vec2::new(
+            self.pos.x + self.width as f32 / 2.0,
+            self.pos.y + self.height as f32 / 2.0,
         );
-        let other_rect = Rect::new(
-            other.pos.x,
-            other.pos.y,
-            other.width as f32,
-            other.height as f32,
+        let other_center = Vec2::new(
+            other.pos.x + other.width as f32 / 2.0,
+            other.pos.y + other.height as f32 / 2.0,
         );
+        let x_overlap =
+            (self.width as f32 + other.width as f32) / 2.0 - (self_center.x - other_center.x).abs();
+        let y_overlap = (self.height as f32 + other.height as f32) / 2.0
+            - (self_center.y - other_center.y).abs();
 
-        if self_rect.overlaps(&other_rect) {
-            let overlap_x = (self_rect.center().x - other_rect.center().x).abs()
-                - (self_rect.w + other_rect.w) * 0.5;
-            let overlap_y = (self_rect.center().y - other_rect.center().y).abs()
-                - (self_rect.h + other_rect.h) * 0.5;
-
-            if overlap_x > overlap_y {
-                if self.pos.x < other.pos.x {
-                    self.pos.x = other.pos.x - self.width as f32;
+        if x_overlap > 0.0 && y_overlap > 0.0 {
+            let y_collision_threshold = 0.2;
+            if y_overlap < self.height as f32 * y_collision_threshold {
+                if self_center.y < other_center.y {
+                    self.pos.y -= y_overlap;
+                    self.velocity.y = 0.0;
                 } else {
-                    self.pos.x = other.pos.x + other.width as f32;
+                    self.pos.y += y_overlap;
+                    self.velocity.y = 0.0;
                 }
-                self.velocity.x = 0.0;
             } else {
-                if self.pos.y < other.pos.y {
-                    self.pos.y = other.pos.y - self.height as f32;
-                    self.velocity.y = 0.0;
+                if x_overlap < y_overlap {
+                    if self_center.x < other_center.x {
+                        self.pos.x -= x_overlap;
+                        self.velocity.x = 0.0;
+                    } else {
+                        self.pos.x += x_overlap;
+                        self.velocity.x = 0.0;
+                    }
                 } else {
-                    self.pos.y = other.pos.y + other.height as f32;
-                    self.velocity.y = 0.0;
+                    if self_center.y < other_center.y {
+                        self.pos.y -= y_overlap;
+                        self.velocity.y = 0.0;
+                    } else {
+                        self.pos.y += y_overlap;
+                        self.velocity.y = 0.0;
+                    }
                 }
             }
         }
     }
+
     fn add_horizontal_velocity(&mut self, velocity: f32) {
         self.velocity.x += velocity as f32;
         if let Some(max_speed) = self.max_speed {
@@ -204,7 +220,7 @@ impl Camera {
         self.y = player_y.saturating_sub(self.height);
     }
 }
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 struct ArrayIndex {
     x: usize,
     y: usize,
@@ -307,6 +323,7 @@ impl World {
     }
     fn update(&mut self) {
         let objects_clone = self.objects.clone();
+        let old_player_idx = self.player_index;
         for row in self.objects.iter_mut() {
             for cell in row.iter_mut() {
                 for object in cell.iter_mut() {
@@ -330,21 +347,38 @@ impl World {
                                 .flatten()
                                 .cloned()
                                 .collect();
-
                             object.update(surrounding_objects);
-                            self.player_index.x = ((object.pos.x) / 16.0) as usize;
-                            self.player_index.y = ((object.pos.y) / 16.0) as usize;
+                            self.player_index.x = (object.pos.x / 16.0) as usize;
+                            self.player_index.y = (object.pos.y / 16.0) as usize;
                         }
                         _ => {}
                     }
                 }
             }
         }
+        if old_player_idx.x != self.player_index.x || old_player_idx.y != self.player_index.y {
+            let player_object = self.objects[old_player_idx.y][old_player_idx.x]
+                .iter()
+                .find(|obj| matches!(obj.object_type, ObjectType::Player))
+                .cloned();
+
+            if let Some(player) = player_object {
+                self.objects[old_player_idx.y][old_player_idx.x]
+                    .retain(|obj| !matches!(obj.object_type, ObjectType::Player));
+                self.objects[self.player_index.y][self.player_index.x].push(player);
+            }
+        }
         self.camera.update(
-            self.objects[self.player_index.y][self.player_index.y][0]
+            self.objects[self.player_index.y][self.player_index.x]
+                .iter()
+                .find(|obj| matches!(obj.object_type, ObjectType::Player))
+                .unwrap()
                 .pos
                 .x as usize,
-            self.objects[self.player_index.y][self.player_index.x][0]
+            self.objects[self.player_index.y][self.player_index.x]
+                .iter()
+                .find(|obj| matches!(obj.object_type, ObjectType::Player))
+                .unwrap()
                 .pos
                 .y as usize,
         );
@@ -366,8 +400,21 @@ impl World {
         }
     }
 }
+fn window_conf() -> Conf {
+    Conf {
+        window_title: "Rustario Bros".to_owned(),
+        window_width: 600,
+        window_height: 400,
+        // Set the desired fps here
+        window_resizable: false,
+        high_dpi: true,
+        fullscreen: false,
+        sample_count: 1,
 
-#[macroquad::main("Rustario Bros")]
+        ..Default::default()
+    }
+}
+#[macroquad::main(window_conf)]
 async fn main() {
     preparation::main();
     println!("Finished preparing level data");

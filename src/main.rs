@@ -1,17 +1,17 @@
 use macroquad::prelude::*;
-use mario_config::mario_config::{GRAVITY, MARIO_SPRITE_BLOCK_SIZE, MARIO_WORLD_SIZE};
-use preparation::Tile;
+use mario_config::mario_config::{
+    ACCELERATION, GRAVITY, JUMP_STRENGTH, MARIO_SPRITE_BLOCK_SIZE, MARIO_WORLD_SIZE,
+    MAX_VELOCITY_X, PHYSICS_FRAME_PER_SECOND, PHYSICS_FRAME_TIME,
+};
+use preparation::LevelData;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::Read;
-use std::thread::sleep;
-use std::time::Duration;
 pub mod image_utils;
 pub mod mario_config;
 pub mod preparation;
 use lazy_static::lazy_static;
-const PHYSICS_FRAME_PER_SECOND: f32 = 60.0;
-const PHYSICS_FRAME_TIME: f32 = 1.0 / PHYSICS_FRAME_PER_SECOND;
+
 const DIRECTIONS: [(isize, isize); 8] = [
     (-1, 0),
     (0, -1),
@@ -24,22 +24,22 @@ const DIRECTIONS: [(isize, isize); 8] = [
 ];
 
 lazy_static! {
-    static ref SPRITE_TYPE_MAPPING: HashMap<&'static str, ObjectType> = {
+    static ref SPRITE_TYPE_MAPPING: HashMap<&'static usize, ObjectType> = {
         let mut m = HashMap::new();
-        m.insert("9.png", ObjectType::Block(BlockType::PowerupBlock));
-        m.insert("10.png", ObjectType::Block(BlockType::Block));
-        m.insert("11.png", ObjectType::Block(BlockType::Block));
-        m.insert("12.png", ObjectType::Block(BlockType::Block));
-        m.insert("13.png", ObjectType::Block(BlockType::Block));
-        m.insert("14.png", ObjectType::Block(BlockType::Block));
-        m.insert("15.png", ObjectType::Block(BlockType::Block));
-        m.insert("16.png", ObjectType::Block(BlockType::Block));
-        m.insert("17.png", ObjectType::Block(BlockType::Block));
-        m.insert("19.png", ObjectType::Block(BlockType::Block));
-        m.insert("20.png", ObjectType::Block(BlockType::Block));
-        m.insert("21.png", ObjectType::Block(BlockType::Block));
-        m.insert("25.png", ObjectType::Block(BlockType::Block));
-        m.insert("31.png", ObjectType::Block(BlockType::Block));
+        m.insert(&9, ObjectType::Block(BlockType::PowerupBlock));
+        m.insert(&10, ObjectType::Block(BlockType::Block));
+        m.insert(&11, ObjectType::Block(BlockType::Block));
+        m.insert(&12, ObjectType::Block(BlockType::Block));
+        m.insert(&13, ObjectType::Block(BlockType::Block));
+        m.insert(&14, ObjectType::Block(BlockType::Block));
+        m.insert(&15, ObjectType::Block(BlockType::Block));
+        m.insert(&16, ObjectType::Block(BlockType::Block));
+        m.insert(&17, ObjectType::Block(BlockType::Block));
+        m.insert(&19, ObjectType::Block(BlockType::Block));
+        m.insert(&20, ObjectType::Block(BlockType::Block));
+        m.insert(&21, ObjectType::Block(BlockType::Block));
+        m.insert(&25, ObjectType::Block(BlockType::Block));
+        m.insert(&31, ObjectType::Block(BlockType::Block));
         m
     };
 }
@@ -71,31 +71,17 @@ struct Object {
     pos: Vec2,
     height: usize,
     width: usize,
-    sprite: Texture2D,
     object_type: ObjectType,
 }
 
 impl Object {
-    fn new(x: usize, y: usize, sprite: Texture2D, object_type: ObjectType) -> Object {
+    fn new(x: usize, y: usize, object_type: ObjectType) -> Object {
         Object {
             pos: Vec2::new(x as f32, y as f32),
-            height: sprite.height() as usize,
-            width: sprite.width() as usize,
-            sprite,
+            height: MARIO_SPRITE_BLOCK_SIZE,
+            width: MARIO_SPRITE_BLOCK_SIZE,
             object_type,
         }
-    }
-
-    fn draw(&self, camera_x: usize, camera_y: usize) {
-        if self.pos.x < camera_x as f32 - 32.0 || self.pos.y < camera_y as f32 {
-            return;
-        }
-        let x = self.pos.x - camera_x as f32;
-        let y = self.pos.y - camera_y as f32;
-        if x > MARIO_WORLD_SIZE.width as f32 || y > MARIO_WORLD_SIZE.height as f32 {
-            return;
-        }
-        draw_texture(&self.sprite, x as f32, y as f32, WHITE);
     }
 }
 
@@ -110,15 +96,17 @@ struct Player {
     max_speed: i32,
     velocity: Vec2,
     is_grounded: bool,
+    sprite: Texture2D,
 }
 
 impl Player {
     fn new(x: usize, y: usize, max_speed: i32, sprite: Texture2D) -> Player {
         Player {
-            object: Object::new(x, y, sprite, ObjectType::Player),
+            object: Object::new(x, y, ObjectType::Player),
             max_speed,
             velocity: Vec2::new(0.0, 0.0),
             is_grounded: false,
+            sprite,
         }
     }
 
@@ -130,13 +118,6 @@ impl Player {
             (self.velocity.x.abs() - 2.0 * PHYSICS_FRAME_TIME) * self.velocity.x.signum();
     }
     fn update(&mut self, surrounding_objects: Vec<Object>) {
-        println!(
-            "Surrounding object types {:?}",
-            surrounding_objects
-                .iter()
-                .map(|obj| obj.object_type)
-                .collect::<Vec<_>>()
-        );
         let self_center_x = self.object.pos.x + self.object.width as f32 / 2.0;
         let block_below = surrounding_objects.iter().find(|obj| {
             obj.pos.y > self.object.pos.y
@@ -224,11 +205,27 @@ impl Player {
             self.velocity.y = -3.0;
             self.is_grounded = false;
         }
+        if self.velocity.y > 0.0 {
+            // if falling by gravity dont allow for slow falling
+            return;
+        }
         self.velocity.y += velocity;
     }
 
     fn draw(&self, camera_x: usize, camera_y: usize) {
-        self.object.draw(camera_x, camera_y);
+        draw_texture_ex(
+            &self.sprite,
+            self.object.pos.x - camera_x as f32,
+            self.object.pos.y - camera_y as f32,
+            WHITE,
+            DrawTextureParams {
+                dest_size: Some(Vec2::new(
+                    self.object.width as f32,
+                    self.object.height as f32,
+                )),
+                ..Default::default()
+            },
+        );
     }
 }
 
@@ -254,14 +251,19 @@ impl Camera {
         self.y = player_y.saturating_sub(self.height);
     }
 }
-
+enum GameState {
+    Playing,
+    GameWon,
+    GameOver,
+}
 struct World {
     height: usize,
     width: usize,
     objects: Vec<Vec<Vec<Object>>>,
     player: Player,
     camera: Camera,
-    game_over: bool,
+    game_state: GameState,
+    level_texture: Option<Texture2D>,
 }
 
 impl World {
@@ -271,9 +273,10 @@ impl World {
             height,
             width,
             objects,
-            player: Player::new(48, 176, 25, Texture2D::empty()), // Temporary empty texture
+            player: Player::new(48, 176, 6, Texture2D::empty()), // Temporary empty texture
             camera: Camera::new(600, height),
-            game_over: false,
+            game_state: GameState::Playing,
+            level_texture: None,
         }
     }
 
@@ -284,34 +287,60 @@ impl World {
         level_data_file
             .read_to_string(&mut level_data_string)
             .expect("Failed to read level data file");
-        let mut sprites_cache: HashMap<String, Texture2D> = HashMap::new();
 
-        let level_data: Vec<Tile> =
+        let level_data: LevelData =
             serde_json::from_str(&level_data_string).expect("Failed to parse level data");
 
-        for tile in level_data {
-            let sprite = if let Some(cached_sprite) = sprites_cache.get(&tile.sprite_name) {
-                cached_sprite.clone()
-            } else {
-                let sprite = load_texture(&tile.sprite_name)
-                    .await
-                    .expect("Failed to load sprite");
-                sprites_cache.insert(tile.sprite_name.clone(), sprite.clone());
-                sprite
-            };
-            let object_type = SPRITE_TYPE_MAPPING
-                .get(tile.sprite_name.as_str().split("/").last().unwrap())
-                .cloned()
-                .unwrap_or(ObjectType::Block(BlockType::Background));
+        let tilesheet = load_texture("sprites/tilesheet.png")
+            .await
+            .expect("Failed to load tilesheet");
+        let mut render_target_camera =
+            Camera2D::from_display_rect(Rect::new(0., 0., self.width as f32, self.height as f32));
 
-            let object = Object::new(
-                tile.start_x as usize,
-                tile.start_y as usize,
-                sprite,
-                object_type,
-            );
-            self.add_object(object);
+        let level_render_target = render_target(self.width as u32, self.height as u32);
+        render_target_camera.render_target = Some(level_render_target);
+        {
+            set_camera(&render_target_camera);
+            for (index, tile) in level_data.tiles.iter().enumerate() {
+                let x = (index as u32 % (self.width / MARIO_SPRITE_BLOCK_SIZE as usize) as u32)
+                    * MARIO_SPRITE_BLOCK_SIZE as u32;
+                let y = (index as u32 / (self.width / MARIO_SPRITE_BLOCK_SIZE as usize) as u32)
+                    * MARIO_SPRITE_BLOCK_SIZE as u32;
+
+                let sprite_y = (*tile as u32 * MARIO_SPRITE_BLOCK_SIZE as u32) as f32;
+
+                draw_texture_ex(
+                    &tilesheet,
+                    x as f32,
+                    y as f32,
+                    WHITE,
+                    DrawTextureParams {
+                        source: Some(Rect {
+                            x: 0.0,
+                            y: sprite_y,
+                            w: MARIO_SPRITE_BLOCK_SIZE as f32,
+                            h: MARIO_SPRITE_BLOCK_SIZE as f32,
+                        }),
+                        dest_size: Some(Vec2::new(
+                            MARIO_SPRITE_BLOCK_SIZE as f32,
+                            MARIO_SPRITE_BLOCK_SIZE as f32,
+                        )),
+                        ..Default::default()
+                    },
+                );
+                self.add_object(Object::new(
+                    x as usize,
+                    y as usize,
+                    SPRITE_TYPE_MAPPING
+                        .get(&tile)
+                        .unwrap_or_else(|| &ObjectType::Block(BlockType::Background))
+                        .clone(),
+                ));
+            }
         }
+        set_default_camera();
+        let render_texture = render_target_camera.render_target.unwrap().texture;
+        self.level_texture = Some(render_texture);
     }
 
     async fn load_player(&mut self) {
@@ -321,7 +350,7 @@ impl World {
         let mut player_sprite = player_sprite.get_texture_data();
         image_utils::convert_white_to_transparent(&mut player_sprite);
         let player_sprite = Texture2D::from_image(&player_sprite);
-        self.player = Player::new(48, 176, 40, player_sprite);
+        self.player = Player::new(48, 176, MAX_VELOCITY_X, player_sprite);
     }
 
     fn add_object(&mut self, object: Object) {
@@ -335,8 +364,6 @@ impl World {
     }
 
     fn handle_input(&mut self) {
-        const ACCELERATION: f32 = 3.0;
-        const JUMP_STRENGTH: f32 = 12.0;
         if is_key_down(KeyCode::Right) || is_key_down(KeyCode::D) {
             self.player
                 .add_horizontal_velocity(ACCELERATION * PHYSICS_FRAME_TIME);
@@ -380,29 +407,45 @@ impl World {
     }
     fn check_player_in_bounds_or_game_over(&mut self) {
         if self.player.object.pos.y > self.height as f32 {
-            self.game_over = true;
+            self.game_state = GameState::GameOver;
         }
         if self.player.object.pos.x > self.width as f32 {
-            self.game_over = true;
+            self.game_state = GameState::GameWon;
         }
         if self.player.object.pos.x < 0.0 {
             self.player.object.pos.x = 0.0;
         }
     }
     fn draw(&self) {
-        if self.game_over {
-            clear_background(BLACK);
-            draw_text("Game Over", 100.0, 100.0, 30.0, RED);
-            return;
-        }
-        for row in self.objects.iter() {
-            for cell in row.iter() {
-                for object in cell.iter() {
-                    object.draw(self.camera.x, self.camera.y);
+        match self.game_state {
+            GameState::GameOver => {
+                draw_text("Game Over", 200.0, 200.0, 40.0, RED);
+            }
+            GameState::GameWon => {
+                draw_text("You Won!", 200.0, 200.0, 40.0, GREEN);
+            }
+            _ => {
+                if let Some(level_texture) = &self.level_texture {
+                    draw_texture_ex(
+                        level_texture,
+                        0.0,
+                        0.0,
+                        WHITE,
+                        DrawTextureParams {
+                            source: Some(Rect::new(
+                                self.camera.x as f32,
+                                self.camera.y as f32,
+                                self.camera.width as f32,
+                                self.camera.height as f32,
+                            )),
+                            flip_y: true,
+                            ..Default::default()
+                        },
+                    );
                 }
+                self.player.draw(self.camera.x, self.camera.y);
             }
         }
-        self.player.draw(self.camera.x, self.camera.y);
     }
 }
 
@@ -436,13 +479,16 @@ async fn main() {
 
     loop {
         clear_background(BLACK);
+
         elapsed_time += get_frame_time();
         while elapsed_time >= target_time_step {
             world.handle_input();
             world.update();
             elapsed_time -= target_time_step;
         }
+
         world.draw();
+
         next_frame().await;
     }
 }

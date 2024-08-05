@@ -436,10 +436,7 @@ impl World {
 
         material.set_uniform(
             "spriteSheetSize",
-            vec2(
-                tilesheet_width_height.0 / 16.0,
-                tilesheet_width_height.1 / 16.0,
-            ),
+            vec2(tilesheet_width_height.0, tilesheet_width_height.1),
         );
         material.set_uniform("spriteSize", 16.0);
 
@@ -501,14 +498,12 @@ impl World {
                         Texture2D::from_rgba8(packed_buffer.len() as u16 / 4, 1, &packed_buffer),
                     );
                     gl_use_material(material);
-                    draw_texture_ex(
-                        &Texture2D::from_rgba8(packed_buffer.len() as u16 / 4, 1, &packed_buffer),
+                    draw_rectangle(
                         0.0,
                         0.0,
-                        WHITE,
-                        DrawTextureParams {
-                            ..Default::default()
-                        },
+                        self.camera.width as f32,
+                        self.camera.height as f32,
+                        BLACK,
                     );
                 }
                 gl_use_default_material();

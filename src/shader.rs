@@ -43,7 +43,7 @@ void main() {
     }
 
     float spriteY = selectedIndex * spriteSize;
-    vec2 spriteUV = (vec2(0.0, spriteY) + fract(texCoord * canvasSize / 2.0)) / spriteSheetSize;
+    vec2 spriteUV = (vec2(0.0, spriteY) + fract(texCoord * canvasSize / 2.0) + spriteOffset) / spriteSheetSize;
     
     gl_FragColor = texture2D(spriteSheet, spriteUV);
 }

@@ -6,13 +6,13 @@ use std::io::Write;
 use crate::mario_config::mario_config::MARIO_SPRITE_BLOCK_SIZE;
 
 pub struct Tile {
-    pub sprite_id: usize,
+    pub sprite_id: u8,
 }
 
 #[derive(Serialize, Deserialize)]
 pub struct LevelData {
     pub height: usize,
-    pub tiles: Vec<usize>,
+    pub tiles: Vec<u8>,
 }
 
 pub fn main() {
@@ -37,18 +37,18 @@ pub fn main() {
                 )
                 .to_image();
             let mut found = false;
-            let mut sprite_id = 0;
+            let mut sprite_id: u8 = 0;
 
             for (i, existing_tile) in tiles_map.iter().enumerate() {
                 if tiles_equal(&tile, existing_tile) {
                     found = true;
-                    sprite_id = i;
+                    sprite_id = i as u8; // Convert usize to u8
                     break;
                 }
             }
 
             if !found {
-                sprite_id = tiles_map.len();
+                sprite_id = tiles_map.len() as u8; // Convert usize to u8
                 tiles_map.push(tile.clone());
             }
 

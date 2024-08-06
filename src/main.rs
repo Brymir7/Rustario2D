@@ -1,3 +1,4 @@
+use image_utils::load_and_convert_texture;
 use macroquad::prelude::*;
 use mario_config::mario_config::{
     ACCELERATION, GRAVITY, JUMP_STRENGTH, MARIO_SPRITE_BLOCK_SIZE, MARIO_WORLD_SIZE,
@@ -42,67 +43,33 @@ lazy_static! {
         m.insert(&31, ObjectType::Block(BlockType::Block));
         m
     };
-    static ref MAP_MOVEMENT_STATE_TO_TEXTURE2D: HashMap<PlayerMovementState, Vec<Texture2D>> = {
-        let mut m: HashMap<PlayerMovementState, Vec<Texture2D>> = HashMap::new();
-
-        fn load_and_convert_texture(data: &[u8], format: ImageFormat) -> Texture2D {
-            let texture = Texture2D::from_file_with_format(data, Some(format));
-            let mut texture_data = texture.get_texture_data();
-            image_utils::convert_white_to_transparent(&mut texture_data);
-            texture.update(&texture_data);
-            texture
-        }
-
-        m.insert(
-            PlayerMovementState::Idle,
-            vec![load_and_convert_texture(
-                include_bytes!("../sprites/Mario.png"),
-                ImageFormat::Png,
-            )],
-        );
-        m.insert(
-            PlayerMovementState::Running,
-            vec![
-                load_and_convert_texture(
-                    include_bytes!("../sprites/Mario_Run1.png"),
-                    ImageFormat::Png,
-                ),
-                load_and_convert_texture(
-                    include_bytes!("../sprites/Mario_Run2.png"),
-                    ImageFormat::Png,
-                ),
-            ],
-        );
-        m.insert(
-            PlayerMovementState::Turning,
-            vec![load_and_convert_texture(
-                include_bytes!("../sprites/Mario_Turn.png"),
-                ImageFormat::Png,
-            )],
-        );
-        m.insert(
-            PlayerMovementState::Jumping,
-            vec![
-                load_and_convert_texture(
-                    include_bytes!("../sprites/Mario_Jump1.png"),
-                    ImageFormat::Png,
-                ),
-                load_and_convert_texture(
-                    include_bytes!("../sprites/Mario_Jump2.png"),
-                    ImageFormat::Png,
-                ),
-            ],
-        );
-        m.insert(
-            PlayerMovementState::RunningJump,
-            vec![load_and_convert_texture(
-                include_bytes!("../sprites/Mario_Jump_HMomentum.png"),
-                ImageFormat::Png,
-            )],
-        );
-
-        m
-    };
+    static ref MARIO_SPRITE_LOOKUP: [Texture2D; 7] = [
+        load_and_convert_texture(include_bytes!("../sprites/Mario.png"), ImageFormat::Png),
+        load_and_convert_texture(
+            include_bytes!("../sprites/Mario_Run1.png"),
+            ImageFormat::Png
+        ),
+        load_and_convert_texture(
+            include_bytes!("../sprites/Mario_Run2.png"),
+            ImageFormat::Png
+        ),
+        load_and_convert_texture(
+            include_bytes!("../sprites/Mario_Jump1.png"),
+            ImageFormat::Png
+        ),
+        load_and_convert_texture(
+            include_bytes!("../sprites/Mario_Jump2.png"),
+            ImageFormat::Png
+        ),
+        load_and_convert_texture(
+            include_bytes!("../sprites/Mario_Turn.png"),
+            ImageFormat::Png
+        ),
+        load_and_convert_texture(
+            include_bytes!("../sprites/Mario_Jump_HMomentum.png"),
+            ImageFormat::Png
+        ),
+    ];
 }
 
 #[derive(Clone, PartialEq, Copy, Debug)]
@@ -164,27 +131,75 @@ enum PlayerPowerupState {
     Small,
     Big,
 }
+struct Animate {
+    frames: Vec<Texture2D>,
+    current_frame: usize,
+    speed_factor: f32,
+    time_to_change: f32,
+    time_elapsed: f32,
+}
+
+impl Animate {
+    fn new(speed_factor: f32) -> Self {
+        assert!(speed_factor > 0.0);
+        Animate {
+            frames: Vec::new(),
+            current_frame: 0,
+            speed_factor,
+            time_to_change: (PHYSICS_FRAME_TIME * 3.0) * speed_factor, // 10 frames per sprite
+            time_elapsed: 0.0,
+        }
+    }
+
+    fn change_animation(&mut self, new_frames: Vec<Texture2D>) {
+        if new_frames != self.frames {
+            self.frames = new_frames;
+            self.current_frame = 0;
+            self.time_elapsed = 0.0;
+        }
+    }
+
+    fn update(&mut self) {
+        if self.frames.len() > 1 {
+            self.time_elapsed += PHYSICS_FRAME_TIME;
+            if self.time_elapsed >= self.time_to_change {
+                self.current_frame = (self.current_frame + 1) % self.frames.len();
+                self.time_elapsed -= self.time_to_change;
+            }
+        }
+    }
+    fn scale_animation_speed(&mut self, factor: f32) {
+        assert!(factor > 0.0);
+        self.speed_factor = factor;
+        self.time_to_change = (PHYSICS_FRAME_TIME * 3.0) * (1.0 / self.speed_factor);
+    }
+    fn current_frame(&self) -> Option<&Texture2D> {
+        self.frames.get(self.current_frame)
+    }
+}
 struct Player {
     object: Object,
     max_speed: i32,
     velocity: Vec2,
     is_grounded: bool,
     powerup_state: PlayerPowerupState,
-    movement_state: PlayerMovementState, // unnecessary, could just do it in the draw function
-    animation_frame: u8,
+    animate: Animate,
 }
 
 impl Player {
     fn new(x: usize, y: usize, max_speed: i32) -> Player {
-        Player {
+        let mut player = Player {
             object: Object::new(x, y, ObjectType::Player),
             max_speed,
             velocity: Vec2::new(0.0, 0.0),
             is_grounded: false,
             powerup_state: PlayerPowerupState::Small,
-            movement_state: PlayerMovementState::Idle,
-            animation_frame: 0,
-        }
+            animate: Animate::new(1.0),
+        };
+        player
+            .animate
+            .change_animation(vec![MARIO_SPRITE_LOOKUP[0].clone()]);
+        player
     }
 
     fn apply_gravity(&mut self) {
@@ -194,25 +209,46 @@ impl Player {
         self.velocity.x =
             (self.velocity.x.abs() - 2.0 * PHYSICS_FRAME_TIME) * self.velocity.x.signum();
     }
-    fn update_player_movement_state(&mut self) {
-        let previous_state = self.movement_state;
 
-        if self.velocity.x.abs() > 0.1 {
-            if self.velocity.y.abs() > 0.0 {
-                self.movement_state = PlayerMovementState::RunningJump;
+    fn update_animation(&mut self) {
+        // Use velocity and keyboard input to determine the correct animation frames
+        if self.velocity.y.abs() > 0.0 {
+            if self.velocity.x.abs() > 2.5 {
+                // Running Jump
+                self.animate
+                    .change_animation(vec![MARIO_SPRITE_LOOKUP[6].clone()]);
+                return;
             } else {
-                self.movement_state = PlayerMovementState::Running;
+                // Jumping
+                self.animate
+                    .change_animation(MARIO_SPRITE_LOOKUP[3..5].to_vec());
+                return;
             }
-        } else if self.velocity.y.abs() > 0.0 {
-            self.movement_state = PlayerMovementState::Jumping;
+        } else if self.velocity.x.abs() > 0.1 {
+            // Running
+            if is_key_down(KeyCode::Right) || is_key_down(KeyCode::D) {
+                if self.velocity.x < 0.0 {
+                    // Turning
+                    self.animate
+                        .change_animation(vec![MARIO_SPRITE_LOOKUP[5].clone()]);
+                    return;
+                }
+            } else if is_key_down(KeyCode::Left) || is_key_down(KeyCode::A) {
+                if self.velocity.x > 0.0 {
+                    // Turning
+                    self.animate
+                        .change_animation(vec![MARIO_SPRITE_LOOKUP[5].clone()]);
+                    return;
+                }
+            }
+            self.animate
+                .change_animation(MARIO_SPRITE_LOOKUP[1..3].to_vec());
+            self.animate
+                .scale_animation_speed(self.velocity.x.abs() / self.max_speed as f32);
         } else {
-            self.movement_state = PlayerMovementState::Idle;
-        }
-
-        if self.movement_state != previous_state {
-            self.animation_frame = 0;
-        } else {
-            self.animation_frame += 1;
+            // Idle
+            self.animate
+                .change_animation(vec![MARIO_SPRITE_LOOKUP[0].clone()]);
         }
     }
 
@@ -245,7 +281,8 @@ impl Player {
                 self.check_and_handle_collision(object);
             }
         }
-        self.update_player_movement_state();
+        self.update_animation();
+        self.animate.update();
     }
     fn check_and_handle_collision(&mut self, other: &Object) {
         let self_center = Vec2::new(
@@ -300,7 +337,8 @@ impl Player {
             .clamp(-self.max_speed as f32, self.max_speed as f32);
     }
 
-    fn add_vertical_velocity(&mut self, velocity: f32) {
+    fn jump(&mut self) {
+        const VELOCITY: f32 = -JUMP_STRENGTH * PHYSICS_FRAME_TIME;
         if self.is_grounded {
             self.velocity.y = -3.0;
             self.is_grounded = false;
@@ -309,31 +347,26 @@ impl Player {
             // if falling by gravity dont allow for slow falling
             return;
         }
-        self.velocity.y += velocity;
+        self.velocity.y += VELOCITY;
     }
 
     fn draw(&mut self, camera_x: usize, camera_y: usize) {
-        // implement animation + draw state using another type (struct) and this implements it then in object
-        let sprites_to_draw = MAP_MOVEMENT_STATE_TO_TEXTURE2D
-            .get(&self.movement_state)
-            .expect("Failed to get sprite to draw");
-        if self.animation_frame >= sprites_to_draw.len() as u8 {
-            self.animation_frame = 0;
+        if let Some(sprite_to_draw) = self.animate.current_frame() {
+            draw_texture_ex(
+                &sprite_to_draw,
+                self.object.pos.x - camera_x as f32,
+                self.object.pos.y - camera_y as f32,
+                WHITE,
+                DrawTextureParams {
+                    dest_size: Some(Vec2::new(
+                        self.object.width as f32 * SCALE_IMAGE_FACTOR,
+                        self.object.height as f32 * SCALE_IMAGE_FACTOR,
+                    )),
+                    flip_x: self.velocity.x < -0.1,
+                    ..Default::default()
+                },
+            );
         }
-        draw_texture_ex(
-            &sprites_to_draw[self.animation_frame as usize],
-            self.object.pos.x - camera_x as f32,
-            self.object.pos.y - camera_y as f32,
-            WHITE,
-            DrawTextureParams {
-                dest_size: Some(Vec2::new(
-                    self.object.width as f32 * SCALE_IMAGE_FACTOR,
-                    self.object.height as f32 * SCALE_IMAGE_FACTOR,
-                )),
-                flip_x: self.velocity.x < -0.1,
-                ..Default::default()
-            },
-        );
     }
 }
 
@@ -475,8 +508,7 @@ impl World {
                 .add_horizontal_velocity(-ACCELERATION * PHYSICS_FRAME_TIME);
         }
         if is_key_down(KeyCode::Space) {
-            self.player
-                .add_vertical_velocity(-JUMP_STRENGTH * PHYSICS_FRAME_TIME);
+            self.player.jump();
         }
     }
 

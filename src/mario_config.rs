@@ -5,7 +5,7 @@ pub mod mario_config {
         pub width: usize,
         pub height: usize,
     }
-
+    pub const SCALE_IMAGE_FACTOR: f32 = 1.0; // bugged if not 1.0
     pub const MARIO_WORLD_SIZE: WorldDimensions = WorldDimensions {
         width: 3392,
         height: 224,

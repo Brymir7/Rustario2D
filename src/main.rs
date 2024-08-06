@@ -1,7 +1,7 @@
 use macroquad::prelude::*;
 use mario_config::mario_config::{
     ACCELERATION, GRAVITY, JUMP_STRENGTH, MARIO_SPRITE_BLOCK_SIZE, MARIO_WORLD_SIZE,
-    MAX_VELOCITY_X, PHYSICS_FRAME_PER_SECOND, PHYSICS_FRAME_TIME,
+    MAX_VELOCITY_X, PHYSICS_FRAME_PER_SECOND, PHYSICS_FRAME_TIME, SCALE_IMAGE_FACTOR,
 };
 use preparation::LevelData;
 use std::collections::HashMap;
@@ -40,6 +40,67 @@ lazy_static! {
         m.insert(&21, ObjectType::Block(BlockType::Block));
         m.insert(&25, ObjectType::Block(BlockType::Block));
         m.insert(&31, ObjectType::Block(BlockType::Block));
+        m
+    };
+    static ref MAP_MOVEMENT_STATE_TO_TEXTURE2D: HashMap<PlayerMovementState, Vec<Texture2D>> = {
+        let mut m: HashMap<PlayerMovementState, Vec<Texture2D>> = HashMap::new();
+
+        fn load_and_convert_texture(data: &[u8], format: ImageFormat) -> Texture2D {
+            let texture = Texture2D::from_file_with_format(data, Some(format));
+            let mut texture_data = texture.get_texture_data();
+            image_utils::convert_white_to_transparent(&mut texture_data);
+            texture.update(&texture_data);
+            texture
+        }
+
+        m.insert(
+            PlayerMovementState::Idle,
+            vec![load_and_convert_texture(
+                include_bytes!("../sprites/Mario.png"),
+                ImageFormat::Png,
+            )],
+        );
+        m.insert(
+            PlayerMovementState::Running,
+            vec![
+                load_and_convert_texture(
+                    include_bytes!("../sprites/Mario_Run1.png"),
+                    ImageFormat::Png,
+                ),
+                load_and_convert_texture(
+                    include_bytes!("../sprites/Mario_Run2.png"),
+                    ImageFormat::Png,
+                ),
+            ],
+        );
+        m.insert(
+            PlayerMovementState::Turning,
+            vec![load_and_convert_texture(
+                include_bytes!("../sprites/Mario_Turn.png"),
+                ImageFormat::Png,
+            )],
+        );
+        m.insert(
+            PlayerMovementState::Jumping,
+            vec![
+                load_and_convert_texture(
+                    include_bytes!("../sprites/Mario_Jump1.png"),
+                    ImageFormat::Png,
+                ),
+                load_and_convert_texture(
+                    include_bytes!("../sprites/Mario_Jump2.png"),
+                    ImageFormat::Png,
+                ),
+            ],
+        );
+        m.insert(
+            PlayerMovementState::RunningJump,
+            vec![load_and_convert_texture(
+                include_bytes!("../sprites/Mario_Jump_HMomentum.png"),
+                ImageFormat::Png,
+            )],
+        );
+
         m
     };
 }
@@ -90,23 +151,39 @@ impl PartialEq for Object {
         self.pos == other.pos && self.object_type == other.object_type
     }
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum PlayerMovementState {
+    Idle,
+    Running,
+    Turning,
+    Jumping, // Jumping and falling
+    RunningJump,
+}
 
+enum PlayerPowerupState {
+    Small,
+    Big,
+}
 struct Player {
     object: Object,
     max_speed: i32,
     velocity: Vec2,
     is_grounded: bool,
-    sprite: Texture2D,
+    powerup_state: PlayerPowerupState,
+    movement_state: PlayerMovementState, // unnecessary, could just do it in the draw function
+    animation_frame: u8,
 }
 
 impl Player {
-    fn new(x: usize, y: usize, max_speed: i32, sprite: Texture2D) -> Player {
+    fn new(x: usize, y: usize, max_speed: i32) -> Player {
         Player {
             object: Object::new(x, y, ObjectType::Player),
             max_speed,
             velocity: Vec2::new(0.0, 0.0),
             is_grounded: false,
-            sprite,
+            powerup_state: PlayerPowerupState::Small,
+            movement_state: PlayerMovementState::Idle,
+            animation_frame: 0,
         }
     }
 
@@ -117,6 +194,28 @@ impl Player {
         self.velocity.x =
             (self.velocity.x.abs() - 2.0 * PHYSICS_FRAME_TIME) * self.velocity.x.signum();
     }
+    fn update_player_movement_state(&mut self) {
+        let previous_state = self.movement_state;
+
+        if self.velocity.x.abs() > 0.1 {
+            if self.velocity.y.abs() > 0.0 {
+                self.movement_state = PlayerMovementState::RunningJump;
+            } else {
+                self.movement_state = PlayerMovementState::Running;
+            }
+        } else if self.velocity.y.abs() > 0.0 {
+            self.movement_state = PlayerMovementState::Jumping;
+        } else {
+            self.movement_state = PlayerMovementState::Idle;
+        }
+
+        if self.movement_state != previous_state {
+            self.animation_frame = 0;
+        } else {
+            self.animation_frame += 1;
+        }
+    }
+
     fn update(&mut self, surrounding_objects: Vec<Object>) {
         let self_center_x = self.object.pos.x + self.object.width as f32 / 2.0;
         let block_below = surrounding_objects.iter().find(|obj| {
@@ -146,6 +245,7 @@ impl Player {
                 self.check_and_handle_collision(object);
             }
         }
+        self.update_player_movement_state();
     }
     fn check_and_handle_collision(&mut self, other: &Object) {
         let self_center = Vec2::new(
@@ -212,17 +312,25 @@ impl Player {
         self.velocity.y += velocity;
     }
 
-    fn draw(&self, camera_x: usize, camera_y: usize) {
+    fn draw(&mut self, camera_x: usize, camera_y: usize) {
+        // implement animation + draw state using another type (struct) and this implements it then in object
+        let sprites_to_draw = MAP_MOVEMENT_STATE_TO_TEXTURE2D
+            .get(&self.movement_state)
+            .expect("Failed to get sprite to draw");
+        if self.animation_frame > sprites_to_draw.len() as u8 {
+            self.animation_frame = 0;
+        }
         draw_texture_ex(
-            &self.sprite,
+            &sprites_to_draw[self.animation_frame as usize % sprites_to_draw.len()],
             self.object.pos.x - camera_x as f32,
             self.object.pos.y - camera_y as f32,
             WHITE,
             DrawTextureParams {
                 dest_size: Some(Vec2::new(
-                    self.object.width as f32,
-                    self.object.height as f32,
+                    self.object.width as f32 * SCALE_IMAGE_FACTOR,
+                    self.object.height as f32 * SCALE_IMAGE_FACTOR,
                 )),
+                flip_x: self.velocity.x < 0.0,
                 ..Default::default()
             },
         );
@@ -273,7 +381,7 @@ impl World {
             height,
             width,
             objects,
-            player: Player::new(48, 176, 6, Texture2D::empty()), // Temporary empty texture
+            player: Player::new(48, 176, 6),
             camera: Camera::new(600, height),
             game_state: GameState::Playing,
             level_texture: None,
@@ -322,8 +430,8 @@ impl World {
                             h: MARIO_SPRITE_BLOCK_SIZE as f32,
                         }),
                         dest_size: Some(Vec2::new(
-                            MARIO_SPRITE_BLOCK_SIZE as f32,
-                            MARIO_SPRITE_BLOCK_SIZE as f32,
+                            MARIO_SPRITE_BLOCK_SIZE as f32 * SCALE_IMAGE_FACTOR,
+                            MARIO_SPRITE_BLOCK_SIZE as f32 * SCALE_IMAGE_FACTOR,
                         )),
                         ..Default::default()
                     },
@@ -344,13 +452,7 @@ impl World {
     }
 
     async fn load_player(&mut self) {
-        let player_sprite = load_texture("sprites/Mario.png")
-            .await
-            .expect("Failed to load player sprite");
-        let mut player_sprite = player_sprite.get_texture_data();
-        image_utils::convert_white_to_transparent(&mut player_sprite);
-        let player_sprite = Texture2D::from_image(&player_sprite);
-        self.player = Player::new(48, 176, MAX_VELOCITY_X, player_sprite);
+        self.player = Player::new(48, 176, MAX_VELOCITY_X);
     }
 
     fn add_object(&mut self, object: Object) {
@@ -405,6 +507,7 @@ impl World {
         );
         self.check_player_in_bounds_or_game_over();
     }
+
     fn check_player_in_bounds_or_game_over(&mut self) {
         if self.player.object.pos.y > self.height as f32 {
             self.game_state = GameState::GameOver;
@@ -416,7 +519,7 @@ impl World {
             self.player.object.pos.x = 0.0;
         }
     }
-    fn draw(&self) {
+    fn draw(&mut self) {
         match self.game_state {
             GameState::GameOver => {
                 draw_text("Game Over", 200.0, 200.0, 40.0, RED);
@@ -438,6 +541,10 @@ impl World {
                                 self.camera.width as f32,
                                 self.camera.height as f32,
                             )),
+                            dest_size: Some(Vec2::new(
+                                self.camera.width as f32 * SCALE_IMAGE_FACTOR,
+                                self.camera.height as f32 * SCALE_IMAGE_FACTOR,
+                            )),
                             flip_y: true,
                             ..Default::default()
                         },
@@ -452,8 +559,8 @@ impl World {
 fn window_conf() -> Conf {
     Conf {
         window_title: "Rustario Bros".to_owned(),
-        window_width: 600,
-        window_height: 400,
+        window_width: 600 * SCALE_IMAGE_FACTOR as i32,
+        window_height: MARIO_WORLD_SIZE.height as i32 * SCALE_IMAGE_FACTOR as i32,
         window_resizable: false,
         high_dpi: true,
         fullscreen: false,
@@ -472,7 +579,6 @@ async fn main() {
     world.load_level().await;
     world.load_player().await;
     println!("Finished loading level");
-    request_new_screen_size(600.0, world.height as f32);
 
     let mut elapsed_time = 0.0;
     let target_time_step = 1.0 / PHYSICS_FRAME_PER_SECOND;

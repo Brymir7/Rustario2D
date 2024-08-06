@@ -43,7 +43,7 @@ lazy_static! {
         m.insert(&31, ObjectType::Block(BlockType::Block));
         m
     };
-    static ref MARIO_SPRITE_LOOKUP: [Texture2D; 7] = [
+    static ref MARIO_SPRITE_LOOKUP: [Texture2D; 6] = [
         load_and_convert_texture(include_bytes!("../sprites/Mario.png"), ImageFormat::Png),
         load_and_convert_texture(
             include_bytes!("../sprites/Mario_Run1.png"),
@@ -55,10 +55,6 @@ lazy_static! {
         ),
         load_and_convert_texture(
             include_bytes!("../sprites/Mario_Jump1.png"),
-            ImageFormat::Png
-        ),
-        load_and_convert_texture(
-            include_bytes!("../sprites/Mario_Jump2.png"),
             ImageFormat::Png
         ),
         load_and_convert_texture(
@@ -212,16 +208,16 @@ impl Player {
 
     fn update_animation(&mut self) {
         // Use velocity and keyboard input to determine the correct animation frames
-        if self.velocity.y.abs() > 0.0 {
-            if self.velocity.x.abs() > 2.5 {
+        if self.velocity.y < 0.0 {
+            if self.velocity.x.abs() > 2.5 && self.velocity.y.abs() > 1.5 {
                 // Running Jump
                 self.animate
-                    .change_animation(vec![MARIO_SPRITE_LOOKUP[6].clone()]);
+                    .change_animation(vec![MARIO_SPRITE_LOOKUP[5].clone()]);
                 return;
             } else {
                 // Jumping
                 self.animate
-                    .change_animation(MARIO_SPRITE_LOOKUP[3..5].to_vec());
+                    .change_animation(vec![MARIO_SPRITE_LOOKUP[3].clone()]);
                 return;
             }
         } else if self.velocity.x.abs() > 0.1 {
@@ -230,14 +226,14 @@ impl Player {
                 if self.velocity.x < 0.0 {
                     // Turning
                     self.animate
-                        .change_animation(vec![MARIO_SPRITE_LOOKUP[5].clone()]);
+                        .change_animation(vec![MARIO_SPRITE_LOOKUP[4].clone()]);
                     return;
                 }
             } else if is_key_down(KeyCode::Left) || is_key_down(KeyCode::A) {
                 if self.velocity.x > 0.0 {
                     // Turning
                     self.animate
-                        .change_animation(vec![MARIO_SPRITE_LOOKUP[5].clone()]);
+                        .change_animation(vec![MARIO_SPRITE_LOOKUP[4].clone()]);
                     return;
                 }
             }
@@ -627,6 +623,7 @@ async fn main() {
 
         world.draw();
 
+        draw_text(&format!("FPS: {}", get_fps()), 10.0, 10.0, 20.0, WHITE);
         next_frame().await;
     }
 }

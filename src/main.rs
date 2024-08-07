@@ -24,7 +24,7 @@ const DIRECTIONS: [(isize, isize); 8] = [
     (1, -1),
     (-1, 1),
 ];
-fn resolve_collision(object: &Object, velocity: &Vec2, other: &Object) -> (Vec2, Vec2) {
+fn resolve_collision_general(object: &Object, velocity: &Vec2, other: &Object) -> (Vec2, Vec2) {
     let self_center = Vec2::new(
         object.pos.x + object.width as f32 / 2.0,
         object.pos.y + object.height as f32 / 2.0,
@@ -74,6 +74,52 @@ fn resolve_collision(object: &Object, velocity: &Vec2, other: &Object) -> (Vec2,
 
     (new_pos, new_velocity)
 }
+trait CollisionHandler {
+    fn resolve_collision(&self, object: &Object, velocity: &Vec2, other: &Object) -> (Vec2, Vec2);
+}
+struct DoNothingCollisionHandler;
+impl CollisionHandler for DoNothingCollisionHandler {
+    fn resolve_collision(&self, object: &Object, velocity: &Vec2, other: &Object) -> (Vec2, Vec2) {
+        (
+            Vec2::new(object.pos.x, object.pos.y),
+            Vec2::new(velocity.x, velocity.y),
+        )
+    }
+}
+struct BlockCollisionHandler;
+impl CollisionHandler for BlockCollisionHandler {
+    fn resolve_collision(&self, object: &Object, velocity: &Vec2, other: &Object) -> (Vec2, Vec2) {
+        let (new_pos, new_velocity) = resolve_collision_general(object, velocity, other);
+        (new_pos, new_velocity)
+    }
+}
+struct EnemyCollisionHandler;
+impl CollisionHandler for EnemyCollisionHandler {
+    fn resolve_collision(&self, object: &Object, velocity: &Vec2, other: &Object) -> (Vec2, Vec2) {
+        let (new_pos, new_velocity) = resolve_collision_general(object, velocity, other);
+        let new_velocity = Vec2::new(-new_velocity.x, new_velocity.y); // reverse direction, typical mario goomba | goomba collision
+        (new_pos, new_velocity)
+    }
+}
+struct EnemyBlockCollisionHandler;
+impl CollisionHandler for EnemyBlockCollisionHandler {
+    fn resolve_collision(&self, object: &Object, velocity: &Vec2, other: &Object) -> (Vec2, Vec2) {
+        let (new_pos, new_velocity) = resolve_collision_general(object, velocity, other);
+        if other.pos.y / 16.0 == object.pos.y / 16.0 {
+            // if goomba is on the same level as block, reverse direction
+            let new_pos = Vec2::new(new_pos.x - 2.0, new_pos.y); // move goomba back a bit, otherwise it will get stuck
+            return (new_pos, Vec2::new(-velocity.x, velocity.y));
+        }
+        (new_pos, new_velocity)
+    }
+}
+struct PlayerEnemyCollisionHandler;
+impl CollisionHandler for PlayerEnemyCollisionHandler {
+    fn resolve_collision(&self, object: &Object, velocity: &Vec2, other: &Object) -> (Vec2, Vec2) {
+        let (new_pos, new_velocity) = resolve_collision_general(object, velocity, other);
+        (new_pos, new_velocity)
+    }
+}
 trait Updatable {
     fn mut_object(&mut self) -> &mut Object;
     fn mut_velocity(&mut self) -> &mut Vec2;
@@ -92,6 +138,7 @@ trait Updatable {
             (self.velocity().x.abs() - 2.0 * PHYSICS_FRAME_TIME) * self.velocity().x.signum();
     }
     fn update_animation(&mut self) {}
+    fn get_collision_handler(&self, object_type: ObjectType) -> Box<dyn CollisionHandler>; // this could be a trait enum?
 
     fn update(&mut self, surrounding_objects: Vec<Object>) {
         let self_center_x = self.object().pos.x + self.object().width as f32 / 2.0;
@@ -115,12 +162,14 @@ trait Updatable {
         }
         let velocity = self.velocity().clone();
         self.mut_object().pos += velocity;
+
         for other in surrounding_objects.iter() {
             if other.object_type == ObjectType::Block(BlockType::Block)
                 || other.object_type == ObjectType::Block(BlockType::PowerupBlock)
             {
+                let collision_handler = self.get_collision_handler(other.object_type);
                 let (new_pos, new_velocity) =
-                    resolve_collision(self.object(), self.velocity(), other);
+                    collision_handler.resolve_collision(self.object(), self.velocity(), other);
                 self.mut_object().pos = new_pos;
                 *self.mut_velocity() = new_velocity;
             }
@@ -317,6 +366,14 @@ impl Updatable for Player {
     fn animate(&mut self) -> &mut Animate {
         &mut self.animate
     }
+    fn get_collision_handler(&self, object_type: ObjectType) -> Box<dyn CollisionHandler> {
+        match object_type {
+            ObjectType::Block(_) => Box::new(BlockCollisionHandler),
+            ObjectType::Enemy(EnemyType::Goomba) => Box::new(EnemyCollisionHandler),
+            ObjectType::Player => Box::new(PlayerEnemyCollisionHandler),
+            _ => panic!("No collision handler for object type: {:?}", object_type),
+        }
+    }
     fn update_animation(&mut self) {
         // Use velocity and keyboard input to determine the correct animation frames
         if self.velocity.y < 0.0 {
@@ -378,7 +435,6 @@ impl Player {
 
     fn update(&mut self, surrounding_objects: Vec<Object>) {
         Updatable::update(self, surrounding_objects);
-        self.animate.update();
     }
 
     fn add_horizontal_velocity(&mut self, velocity: f32) {
@@ -402,7 +458,7 @@ impl Player {
         self.velocity.y += VELOCITY;
     }
 
-    fn draw(&mut self, camera_x: usize, camera_y: usize) {
+    fn draw(&self, camera_x: usize, camera_y: usize) {
         // TODO! draw using Animate
         if let Some(sprite_to_draw) = self.animate.current_frame() {
             draw_texture_ex(
@@ -453,6 +509,14 @@ impl Updatable for Goomba {
     fn animate(&mut self) -> &mut Animate {
         &mut self.animate
     }
+    fn get_collision_handler(&self, object_type: ObjectType) -> Box<dyn CollisionHandler> {
+        match object_type {
+            ObjectType::Block(_) => Box::new(EnemyBlockCollisionHandler),
+            ObjectType::Enemy(EnemyType::Goomba) => Box::new(EnemyCollisionHandler),
+            ObjectType::Player => Box::new(DoNothingCollisionHandler), // Goomba does not interact with player, player will handle goomba collision
+            _ => panic!("No collision handler for object type: {:?}", object_type),
+        }
+    }
     fn update_animation(&mut self) {
         if self.velocity.x.abs() > 0.1 {
             self.animate.change_animation(GOOMBA_SPRITE_LOOKUP.to_vec());
@@ -469,7 +533,7 @@ impl Goomba {
         let mut goomba = Goomba {
             object: Object::new(x, y, ObjectType::Enemy(EnemyType::Goomba)),
             max_speed,
-            velocity: Vec2::new(0.0, 0.0),
+            velocity: Vec2::new(1.0, 0.0),
             animate: Animate::new(1.0),
             is_grounded: false,
         };
@@ -479,10 +543,10 @@ impl Goomba {
         goomba
     }
     fn update(&mut self, surrounding_objects: Vec<Object>) {
+        self.velocity.x = 1.0 * self.velocity.x.signum(); // avoid friction atm;
         Updatable::update(self, surrounding_objects);
-        self.animate.update();
     }
-    fn draw(&mut self, camera_x: usize, camera_y: usize) {
+    fn draw(&self, camera_x: usize, camera_y: usize) {
         // TODO! draw using Animate
         if let Some(sprite_to_draw) = self.animate.current_frame() {
             draw_texture_ex(
@@ -534,6 +598,7 @@ struct World {
     width: usize,
     objects: Vec<Vec<Vec<Object>>>,
     player: Player,
+    enemies: Vec<Goomba>,
     camera: Camera,
     game_state: GameState,
     level_texture: Option<Texture2D>,
@@ -547,6 +612,7 @@ impl World {
             width,
             objects,
             player: Player::new(48, 176, 6),
+            enemies: Vec::new(),
             camera: Camera::new(600, height),
             game_state: GameState::Playing,
             level_texture: None,
@@ -613,7 +679,8 @@ impl World {
         }
         set_default_camera();
         let render_texture = render_target_camera.render_target.unwrap().texture;
-        self.level_texture = Some(render_texture);
+        self.level_texture = Some(render_texture); // to draw in one call, while keeping compressed json instead of loading a .png
+        self.add_object(Object::new(200, 176, ObjectType::Enemy(EnemyType::Goomba)));
     }
 
     async fn load_player(&mut self) {
@@ -626,6 +693,14 @@ impl World {
         if y > self.objects.len() - 1 || x > self.objects[y].len() - 1 {
             println!("Object out of bounds at x: {}, y: {}", x, y);
             return;
+        }
+        let pos = object.pos;
+        match object.object_type {
+            ObjectType::Enemy(EnemyType::Goomba) => {
+                self.enemies
+                    .push(Goomba::new(pos.x as usize, pos.y as usize, 2));
+            }
+            _ => {}
         }
         self.objects[y][x].push(object);
     }
@@ -643,28 +718,62 @@ impl World {
             self.player.jump();
         }
     }
-
-    fn update(&mut self) {
-        let surrounding_objects: Vec<_> = DIRECTIONS
+    fn get_surrounding_objects(objects: &Vec<Vec<Vec<Object>>>, object: &Object) -> Vec<Object> {
+        DIRECTIONS
             .iter()
             .filter_map(|(dy, dx)| {
-                let new_y = (self.player.object.pos.y / 16.0).round() as isize + *dy;
-                let new_x = (self.player.object.pos.x / 16.0).round() as isize + *dx;
+                let new_y = (object.pos.y / 16.0).round() as isize + *dy;
+                let new_x = (object.pos.x / 16.0).round() as isize + *dx;
 
                 if new_y >= 0
-                    && new_y < self.objects.len() as isize
+                    && new_y < objects.len() as isize
                     && new_x >= 0
-                    && new_x < self.objects[0].len() as isize
+                    && new_x < objects[0].len() as isize
                 {
-                    Some(self.objects[new_y as usize][new_x as usize].clone())
+                    Some(objects[new_y as usize][new_x as usize].clone())
                 } else {
                     None
                 }
             })
             .flatten()
-            .collect();
+            .collect()
+    }
+    fn update(&mut self) {
+        for enemy in &mut self.enemies {
+            let surrounding_objects = Self::get_surrounding_objects(&self.objects, &enemy.object);
+            let old_x = (enemy.object.pos.x / 16.0).round() as usize;
+            let old_y = (enemy.object.pos.y / 16.0).round() as usize;
+            enemy.update(surrounding_objects);
+            let new_x = (enemy.object.pos.x / 16.0).round() as usize;
+            let new_y = (enemy.object.pos.y / 16.0).round() as usize;
+            if old_x != new_x || old_y != new_y {
+                self.objects[old_y][old_x].retain(|obj| match obj.object_type {
+                    ObjectType::Enemy(_) => false,
+                    _ => true,
+                });
+                assert!(
+                    new_y < self.objects.len() && new_x < self.objects[new_y].len(),
+                    "Enemy out of bounds"
+                );
+                self.objects[new_y][new_x].push(enemy.object.clone());
+            }
+        }
 
-        self.player.update(surrounding_objects);
+        let player_old_x = (self.player.object.pos.x / 16.0).round() as usize;
+        let player_old_y = (self.player.object.pos.y / 16.0).round() as usize;
+        self.objects[player_old_y][player_old_x]
+            .retain(|obj| obj.object_type != ObjectType::Player);
+        let player_surrounding_objects =
+            Self::get_surrounding_objects(&self.objects, &self.player.object);
+        self.player.update(player_surrounding_objects);
+        let player_new_x = (self.player.object.pos.x / 16.0).round() as usize;
+        let player_new_y = (self.player.object.pos.y / 16.0).round() as usize;
+        assert!(
+            player_new_y < self.objects.len() && player_new_x < self.objects[player_new_y].len(),
+            "Player out of bounds",
+        );
+        self.objects[player_new_y][player_new_x].push(self.player.object.clone());
+
         self.camera.update(
             self.player.object.pos.x as usize,
             self.player.object.pos.y as usize,
@@ -683,7 +792,7 @@ impl World {
             self.player.object.pos.x = 0.0;
         }
     }
-    fn draw(&mut self) {
+    fn draw(&self) {
         match self.game_state {
             GameState::GameOver => {
                 draw_text("Game Over", 200.0, 200.0, 40.0, RED);
@@ -713,6 +822,9 @@ impl World {
                             ..Default::default()
                         },
                     );
+                }
+                for enemy in &self.enemies {
+                    enemy.draw(self.camera.x, self.camera.y);
                 }
                 self.player.draw(self.camera.x, self.camera.y);
             }

@@ -10,6 +10,7 @@ use std::fs::File;
 use std::io::Read;
 pub mod image_utils;
 pub mod mario_config;
+
 pub mod preparation;
 use lazy_static::lazy_static;
 
@@ -23,6 +24,111 @@ const DIRECTIONS: [(isize, isize); 8] = [
     (1, -1),
     (-1, 1),
 ];
+fn resolve_collision(object: &Object, velocity: &Vec2, other: &Object) -> (Vec2, Vec2) {
+    let self_center = Vec2::new(
+        object.pos.x + object.width as f32 / 2.0,
+        object.pos.y + object.height as f32 / 2.0,
+    );
+    let other_center = Vec2::new(
+        other.pos.x + other.width as f32 / 2.0,
+        other.pos.y + other.height as f32 / 2.0,
+    );
+    let x_overlap =
+        (object.width as f32 + other.width as f32) / 2.0 - (self_center.x - other_center.x).abs();
+    let y_overlap =
+        (object.height as f32 + other.height as f32) / 2.0 - (self_center.y - other_center.y).abs();
+
+    let mut new_pos = object.pos;
+    let mut new_velocity = *velocity;
+
+    if x_overlap > 0.0 && y_overlap > 0.0 {
+        let y_collision_threshold = 0.2;
+        if y_overlap < object.height as f32 * y_collision_threshold {
+            if self_center.y < other_center.y {
+                new_pos.y -= y_overlap;
+                new_velocity.y = 0.0;
+            } else {
+                new_pos.y += y_overlap;
+                new_velocity.y = 0.0;
+            }
+        } else {
+            if x_overlap < y_overlap {
+                if self_center.x < other_center.x {
+                    new_pos.x -= x_overlap;
+                    new_velocity.x = 0.0;
+                } else {
+                    new_pos.x += x_overlap;
+                    new_velocity.x = 0.0;
+                }
+            } else {
+                if self_center.y < other_center.y {
+                    new_pos.y -= y_overlap;
+                    new_velocity.y = 0.0;
+                } else {
+                    new_pos.y += y_overlap;
+                    new_velocity.y = 0.0;
+                }
+            }
+        }
+    }
+
+    (new_pos, new_velocity)
+}
+trait Updatable {
+    fn mut_object(&mut self) -> &mut Object;
+    fn mut_velocity(&mut self) -> &mut Vec2;
+    fn object(&self) -> &Object;
+    fn velocity(&self) -> &Vec2;
+
+    fn set_grounded(&mut self, grounded: bool);
+    fn animate(&mut self) -> &mut Animate;
+
+    fn apply_gravity(&mut self) {
+        self.mut_velocity().y += GRAVITY as f32 * PHYSICS_FRAME_TIME;
+    }
+
+    fn apply_x_axis_friction(&mut self) {
+        self.mut_velocity().x =
+            (self.velocity().x.abs() - 2.0 * PHYSICS_FRAME_TIME) * self.velocity().x.signum();
+    }
+    fn update_animation(&mut self) {}
+
+    fn update(&mut self, surrounding_objects: Vec<Object>) {
+        let self_center_x = self.object().pos.x + self.object().width as f32 / 2.0;
+        let block_below = surrounding_objects.iter().find(|obj| {
+            obj.pos.y > self.object().pos.y
+                && obj.pos.x < self_center_x
+                && obj.pos.x + obj.width as f32 > self_center_x
+                && matches!(
+                    obj.object_type,
+                    ObjectType::Block(BlockType::Block)
+                        | ObjectType::Block(BlockType::PowerupBlock)
+                )
+        });
+
+        if block_below.is_none() {
+            self.apply_gravity();
+            self.set_grounded(false);
+        } else {
+            self.set_grounded(true);
+            self.apply_x_axis_friction();
+        }
+        let velocity = self.velocity().clone();
+        self.mut_object().pos += velocity;
+        for other in surrounding_objects.iter() {
+            if other.object_type == ObjectType::Block(BlockType::Block)
+                || other.object_type == ObjectType::Block(BlockType::PowerupBlock)
+            {
+                let (new_pos, new_velocity) =
+                    resolve_collision(self.object(), self.velocity(), other);
+                self.mut_object().pos = new_pos;
+                *self.mut_velocity() = new_velocity;
+            }
+        }
+        self.update_animation();
+        self.animate().update();
+    }
+}
 
 lazy_static! {
     static ref SPRITE_TYPE_MAPPING: HashMap<&'static usize, ObjectType> = {
@@ -66,12 +172,17 @@ lazy_static! {
             ImageFormat::Png
         ),
     ];
+    static ref GOOMBA_SPRITE_LOOKUP: [Texture2D; 3] = [
+        load_and_convert_texture(include_bytes!("../sprites/Goomba1.png"), ImageFormat::Png),
+        load_and_convert_texture(include_bytes!("../sprites/Goomba2.png"), ImageFormat::Png),
+        load_and_convert_texture(include_bytes!("../sprites/Goomba3.png"), ImageFormat::Png),
+    ];
 }
 
 #[derive(Clone, PartialEq, Copy, Debug)]
 enum BlockType {
     Block,
-    MovementBlock,
+
     Background,
     PowerupBlock,
 }
@@ -173,6 +284,7 @@ impl Animate {
         self.frames.get(self.current_frame)
     }
 }
+
 struct Player {
     object: Object,
     max_speed: i32,
@@ -181,31 +293,30 @@ struct Player {
     powerup_state: PlayerPowerupState,
     animate: Animate,
 }
-
-impl Player {
-    fn new(x: usize, y: usize, max_speed: i32) -> Player {
-        let mut player = Player {
-            object: Object::new(x, y, ObjectType::Player),
-            max_speed,
-            velocity: Vec2::new(0.0, 0.0),
-            is_grounded: false,
-            powerup_state: PlayerPowerupState::Small,
-            animate: Animate::new(1.0),
-        };
-        player
-            .animate
-            .change_animation(vec![MARIO_SPRITE_LOOKUP[0].clone()]);
-        player
+impl Updatable for Player {
+    fn mut_object(&mut self) -> &mut Object {
+        &mut self.object
     }
 
-    fn apply_gravity(&mut self) {
-        self.velocity.y += GRAVITY as f32 * PHYSICS_FRAME_TIME;
-    }
-    fn apply_x_axis_friction(&mut self) {
-        self.velocity.x =
-            (self.velocity.x.abs() - 2.0 * PHYSICS_FRAME_TIME) * self.velocity.x.signum();
+    fn mut_velocity(&mut self) -> &mut Vec2 {
+        &mut self.velocity
     }
 
+    fn object(&self) -> &Object {
+        &self.object
+    }
+
+    fn velocity(&self) -> &Vec2 {
+        &self.velocity
+    }
+
+    fn set_grounded(&mut self, grounded: bool) {
+        self.is_grounded = grounded;
+    }
+
+    fn animate(&mut self) -> &mut Animate {
+        &mut self.animate
+    }
     fn update_animation(&mut self) {
         // Use velocity and keyboard input to determine the correct animation frames
         if self.velocity.y < 0.0 {
@@ -247,84 +358,29 @@ impl Player {
                 .change_animation(vec![MARIO_SPRITE_LOOKUP[0].clone()]);
         }
     }
+}
+
+impl Player {
+    fn new(x: usize, y: usize, max_speed: i32) -> Player {
+        let mut player = Player {
+            object: Object::new(x, y, ObjectType::Player),
+            max_speed,
+            velocity: Vec2::new(0.0, 0.0),
+            is_grounded: false,
+            powerup_state: PlayerPowerupState::Small,
+            animate: Animate::new(1.0),
+        };
+        player
+            .animate
+            .change_animation(vec![MARIO_SPRITE_LOOKUP[0].clone()]);
+        player
+    }
 
     fn update(&mut self, surrounding_objects: Vec<Object>) {
-        let self_center_x = self.object.pos.x + self.object.width as f32 / 2.0;
-        let block_below = surrounding_objects.iter().find(|obj| {
-            obj.pos.y > self.object.pos.y
-                && obj.pos.x < self_center_x
-                && obj.pos.x + obj.width as f32 > self_center_x
-                && matches!(
-                    obj.object_type,
-                    ObjectType::Block(BlockType::Block)
-                        | ObjectType::Block(BlockType::PowerupBlock)
-                        | ObjectType::Block(BlockType::MovementBlock)
-                )
-        });
-
-        if block_below.is_none() {
-            self.apply_gravity();
-            self.is_grounded = false;
-        } else {
-            self.is_grounded = true;
-            self.apply_x_axis_friction();
-        }
-        self.object.pos += self.velocity;
-        for object in surrounding_objects.iter() {
-            if object.object_type == ObjectType::Block(BlockType::Block)
-                || object.object_type == ObjectType::Block(BlockType::PowerupBlock)
-            {
-                self.check_and_handle_collision(object);
-            }
-        }
-        self.update_animation();
+        Updatable::update(self, surrounding_objects);
         self.animate.update();
     }
-    fn check_and_handle_collision(&mut self, other: &Object) {
-        let self_center = Vec2::new(
-            self.object.pos.x + self.object.width as f32 / 2.0,
-            self.object.pos.y + self.object.height as f32 / 2.0,
-        );
-        let other_center = Vec2::new(
-            other.pos.x + other.width as f32 / 2.0,
-            other.pos.y + other.height as f32 / 2.0,
-        );
-        let x_overlap = (self.object.width as f32 + other.width as f32) / 2.0
-            - (self_center.x - other_center.x).abs();
-        let y_overlap = (self.object.height as f32 + other.height as f32) / 2.0
-            - (self_center.y - other_center.y).abs();
 
-        if x_overlap > 0.0 && y_overlap > 0.0 {
-            let y_collision_threshold = 0.2;
-            if y_overlap < self.object.height as f32 * y_collision_threshold {
-                if self_center.y < other_center.y {
-                    self.object.pos.y -= y_overlap;
-                    self.velocity.y = 0.0;
-                } else {
-                    self.object.pos.y += y_overlap;
-                    self.velocity.y = 0.0;
-                }
-            } else {
-                if x_overlap < y_overlap {
-                    if self_center.x < other_center.x {
-                        self.object.pos.x -= x_overlap;
-                        self.velocity.x = 0.0;
-                    } else {
-                        self.object.pos.x += x_overlap;
-                        self.velocity.x = 0.0;
-                    }
-                } else {
-                    if self_center.y < other_center.y {
-                        self.object.pos.y -= y_overlap;
-                        self.velocity.y = 0.0;
-                    } else {
-                        self.object.pos.y += y_overlap;
-                        self.velocity.y = 0.0;
-                    }
-                }
-            }
-        }
-    }
     fn add_horizontal_velocity(&mut self, velocity: f32) {
         self.velocity.x += velocity;
         self.velocity.x = self
@@ -347,6 +403,7 @@ impl Player {
     }
 
     fn draw(&mut self, camera_x: usize, camera_y: usize) {
+        // TODO! draw using Animate
         if let Some(sprite_to_draw) = self.animate.current_frame() {
             draw_texture_ex(
                 &sprite_to_draw,
@@ -365,7 +422,86 @@ impl Player {
         }
     }
 }
+struct Goomba {
+    object: Object,
+    max_speed: i32,
+    velocity: Vec2,
+    animate: Animate,
+    is_grounded: bool,
+}
+impl Updatable for Goomba {
+    fn mut_object(&mut self) -> &mut Object {
+        &mut self.object
+    }
 
+    fn mut_velocity(&mut self) -> &mut Vec2 {
+        &mut self.velocity
+    }
+
+    fn object(&self) -> &Object {
+        &self.object
+    }
+
+    fn velocity(&self) -> &Vec2 {
+        &self.velocity
+    }
+
+    fn set_grounded(&mut self, grounded: bool) {
+        self.is_grounded = grounded;
+    }
+
+    fn animate(&mut self) -> &mut Animate {
+        &mut self.animate
+    }
+    fn update_animation(&mut self) {
+        if self.velocity.x.abs() > 0.1 {
+            self.animate.change_animation(GOOMBA_SPRITE_LOOKUP.to_vec());
+            self.animate
+                .scale_animation_speed(self.velocity.x.abs() / self.max_speed as f32);
+        } else {
+            self.animate
+                .change_animation(vec![GOOMBA_SPRITE_LOOKUP[0].clone()]);
+        }
+    }
+}
+impl Goomba {
+    fn new(x: usize, y: usize, max_speed: i32) -> Goomba {
+        let mut goomba = Goomba {
+            object: Object::new(x, y, ObjectType::Enemy(EnemyType::Goomba)),
+            max_speed,
+            velocity: Vec2::new(0.0, 0.0),
+            animate: Animate::new(1.0),
+            is_grounded: false,
+        };
+        goomba
+            .animate
+            .change_animation(GOOMBA_SPRITE_LOOKUP.to_vec());
+        goomba
+    }
+    fn update(&mut self, surrounding_objects: Vec<Object>) {
+        Updatable::update(self, surrounding_objects);
+        self.animate.update();
+    }
+    fn draw(&mut self, camera_x: usize, camera_y: usize) {
+        // TODO! draw using Animate
+        if let Some(sprite_to_draw) = self.animate.current_frame() {
+            draw_texture_ex(
+                &sprite_to_draw,
+                self.object.pos.x - camera_x as f32,
+                self.object.pos.y - camera_y as f32,
+                WHITE,
+                DrawTextureParams {
+                    dest_size: Some(Vec2::new(
+                        self.object.width as f32 * SCALE_IMAGE_FACTOR,
+                        self.object.height as f32 * SCALE_IMAGE_FACTOR,
+                    )),
+                    flip_x: self.velocity.x < -0.1,
+                    ..Default::default()
+                },
+            );
+        }
+    }
+}
 struct Camera {
     x: usize,
     y: usize,

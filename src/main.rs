@@ -5,6 +5,7 @@ use mario_config::mario_config::{
     MAX_VELOCITY_X, PHYSICS_FRAME_PER_SECOND, PHYSICS_FRAME_TIME, SCALE_IMAGE_FACTOR,
 };
 use preparation::LevelData;
+use std::cell::Ref;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::Read;
@@ -246,38 +247,36 @@ trait Updatable {
         self.mut_object().pos += velocity;
 
         for other in surrounding_objects.iter() {
-            if other.object_type != ObjectType::Block(BlockType::Background) {
-                let collision_handler = self.get_collision_handler(other.object_type);
-                let collision_response =
-                    collision_handler.resolve_collision(self.object(), self.velocity(), other);
+            let collision_handler = self.get_collision_handler(other.object_type);
+            let collision_response =
+                collision_handler.resolve_collision(self.object(), self.velocity(), other);
 
-                if collision_response.collided {
-                    *self.mut_velocity() = collision_response.new_velocity;
-                    self.mut_object().pos = collision_response.new_pos;
-                }
+            if collision_response.collided {
+                *self.mut_velocity() = collision_response.new_velocity;
+                self.mut_object().pos = collision_response.new_pos;
+            }
 
-                if let Some(collision_type) = collision_response.collision_type {
-                    possible_game_events = Some(Vec::new());
-                    let game_event = match collision_type {
-                        CollisionType::PlayerKillEnemy => GameEvent {
-                            event: GameEventType::Kill,
-                            triggered_by: other.clone(),
-                            target: Some(self.object().clone()),
-                        },
-                        CollisionType::PlayerHitBy => GameEvent {
-                            event: GameEventType::PlayerHit,
-                            triggered_by: other.clone(),
-                            target: Some(self.object().clone()),
-                        },
+            if let Some(collision_type) = collision_response.collision_type {
+                possible_game_events = Some(Vec::new());
+                let game_event = match collision_type {
+                    CollisionType::PlayerKillEnemy => GameEvent {
+                        event: GameEventType::Kill,
+                        triggered_by: other.clone(),
+                        target: Some(self.object().clone()),
+                    },
+                    CollisionType::PlayerHitBy => GameEvent {
+                        event: GameEventType::PlayerHit,
+                        triggered_by: other.clone(),
+                        target: Some(self.object().clone()),
+                    },
 
-                        _ => continue,
-                    };
-                    if let Some(mut events) = possible_game_events {
-                        events.push(game_event);
-                        possible_game_events = Some(events);
-                    } else {
-                        possible_game_events = Some(vec![game_event]);
-                    }
+                    _ => continue,
+                };
+                if let Some(mut events) = possible_game_events {
+                    events.push(game_event);
+                    possible_game_events = Some(events);
+                } else {
+                    possible_game_events = Some(vec![game_event]);
                 }
             }
         }
@@ -349,8 +348,6 @@ lazy_static! {
 #[derive(Clone, PartialEq, Copy, Debug)]
 enum BlockType {
     Block,
-
-    Background,
     PowerupBlock,
 }
 
@@ -772,11 +769,12 @@ enum ObjectReference {
     Block(Object),
     Enemy(usize), // Index into the self.enemies vector
     Player,
+    None,
 }
 struct World {
     height: usize,
     width: usize,
-    objects: Vec<Vec<Vec<ObjectReference>>>,
+    objects: Vec<Vec<ObjectReference>>,
     player: Player,
     enemies: Vec<Goomba>,
     camera: Camera,
@@ -786,7 +784,8 @@ struct World {
 
 impl World {
     fn new(height: usize, width: usize) -> World {
-        let objects = vec![vec![vec![]; (width / 16) as usize]; (height / 16) as usize];
+        let objects =
+            vec![vec![ObjectReference::None; width / MARIO_SPRITE_BLOCK_SIZE as usize]; height];
         World {
             height,
             width,
@@ -847,14 +846,9 @@ impl World {
                         ..Default::default()
                     },
                 );
-                self.add_object(Object::new(
-                    x as usize,
-                    y as usize,
-                    SPRITE_TYPE_MAPPING
-                        .get(&tile)
-                        .unwrap_or_else(|| &ObjectType::Block(BlockType::Background))
-                        .clone(),
-                ));
+                if let Some(object_type) = SPRITE_TYPE_MAPPING.get(&tile) {
+                    self.add_object(Object::new(x as usize, y as usize, object_type.clone()));
+                }
             }
         }
         set_default_camera();
@@ -889,11 +883,15 @@ impl World {
             }
             _ => {}
         }
-        self.objects[y][x].push(match object.object_type {
-            ObjectType::Block(_) => ObjectReference::Block(object),
-            ObjectType::Enemy(_) => ObjectReference::Enemy(self.enemies.len() - 1),
-            ObjectType::Player => ObjectReference::Player,
-        });
+        if let ObjectReference::None = self.objects[y][x] {
+            self.objects[y][x] = match object.object_type {
+                ObjectType::Block(_) => ObjectReference::Block(object),
+                ObjectType::Enemy(_) => ObjectReference::Enemy(self.enemies.len() - 1),
+                ObjectType::Player => ObjectReference::Player,
+            };
+        } else {
+            panic!("Tried to add object where: Object already exists");
+        }
     }
 
     fn handle_input(&mut self) {
@@ -910,11 +908,11 @@ impl World {
         }
     }
     fn get_surrounding_objects(
-        objects: &Vec<Vec<Vec<ObjectReference>>>,
+        objects: &Vec<Vec<ObjectReference>>,
         enemies: &Vec<Goomba>,
         object: &Object,
     ) -> Vec<Object> {
-        DIRECTIONS
+        let surrounding_objects_refs = DIRECTIONS
             .iter()
             .filter_map(|(dy, dx)| {
                 let new_y = (object.pos.y / 16.0).round() as isize + *dy;
@@ -925,28 +923,27 @@ impl World {
                     && new_x >= 0
                     && new_x < objects[0].len() as isize
                 {
-                    Some(
-                        objects[new_y as usize][new_x as usize]
-                            .iter()
-                            .filter_map(|obj_ref| match obj_ref {
-                                ObjectReference::Block(obj) => Some(obj.clone()),
-                                ObjectReference::Enemy(idx) => {
-                                    if *idx < enemies.len() {
-                                        Some(enemies[*idx].object.clone())
-                                    } else {
-                                        None
-                                    }
-                                }
-                                ObjectReference::Player => None, // Player interacts with enemies, not the other way around
-                            })
-                            .collect::<Vec<Object>>(),
-                    )
+                    Some(objects[new_y as usize][new_x as usize].clone())
                 } else {
                     None
                 }
             })
-            .flatten()
-            .collect()
+            .collect::<Vec<ObjectReference>>();
+        surrounding_objects_refs
+            .iter()
+            .filter_map(|reference| match reference {
+                ObjectReference::Block(object) => Some(object.clone()),
+                ObjectReference::Enemy(index) => {
+                    if *index > enemies.len() - 1 {
+                        return None;
+                    }
+                    let enemy = enemies[*index].clone();
+                    Some(enemy.object)
+                }
+                ObjectReference::Player => None,
+                ObjectReference::None => None,
+            })
+            .collect::<Vec<Object>>()
     }
     fn handle_game_event(&mut self, game_event: GameEvent) {
         println!("Game event: {:?}", game_event.event);
@@ -962,10 +959,7 @@ impl World {
                 let obj_idx_y = (game_event.triggered_by.pos.y / 16.0).round() as usize;
                 self.enemies
                     .retain(|enemy| enemy.object != game_event.triggered_by);
-                self.objects[obj_idx_y][obj_idx_x].retain(|obj| match obj {
-                    ObjectReference::Enemy(_) => false,
-                    _ => true,
-                });
+                self.objects[obj_idx_y][obj_idx_x] = ObjectReference::None;
             }
             GameEventType::PlayerHit => {}
         }
@@ -998,15 +992,13 @@ impl World {
             if old_x == new_x && old_y == new_y {
                 continue;
             }
-            self.objects[old_y][old_x]
-                .retain(|obj| !matches!(obj, ObjectReference::Enemy(idx) if *idx == i));
-            self.objects[new_y][new_x].push(ObjectReference::Enemy(i));
+            self.objects[old_y][old_x] = ObjectReference::None;
+            self.objects[new_y][new_x] = ObjectReference::Enemy(i);
         }
 
         let player_old_x = (self.player.object.pos.x / 16.0).round() as usize;
         let player_old_y = (self.player.object.pos.y / 16.0).round() as usize;
-        self.objects[player_old_y][player_old_x]
-            .retain(|obj| !matches!(obj, ObjectReference::Player));
+        self.objects[player_old_y][player_old_x] = ObjectReference::None;
         let player_surrounding_objects: Vec<Object> =
             Self::get_surrounding_objects(&self.objects, &self.enemies, &self.player.object);
 
@@ -1020,7 +1012,7 @@ impl World {
             player_new_y < self.objects.len() && player_new_x < self.objects[player_new_y].len(),
             "Player out of bounds",
         );
-        self.objects[player_new_y][player_new_x].push(ObjectReference::Player);
+        self.objects[player_new_y][player_new_x] = ObjectReference::Player;
 
         self.camera.update(
             self.player.object.pos.x as usize,

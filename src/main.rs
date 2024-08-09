@@ -136,15 +136,11 @@ impl CollisionHandler for EnemyCollisionHandler {
         velocity: &Vec2,
         other: &Object,
     ) -> CollisionResponse {
-        let collision_response = resolve_collision_general(object, velocity, other);
-        let new_velocity = Vec2::new(
-            -collision_response.new_velocity.x,
-            collision_response.new_velocity.y,
-        ); // reverse direction, typical mario goomba | goomba collision
+        // let collision_response = resolve_collision_general(object, velocity, other);
         CollisionResponse {
-            new_pos: collision_response.new_pos,
-            new_velocity,
-            collided: collision_response.collided,
+            new_pos: Vec2::new(object.pos.x - velocity.x * 2.0, object.pos.y), // keep old position, such that other goomba also inverts
+            new_velocity: Vec2::new(-velocity.x, velocity.y), // reverse direction, typical mario goomba | goomba collision
+            collided: true,
             collision_type: Some(CollisionType::EnemyWithEnemy),
         }
     }
@@ -160,16 +156,10 @@ impl CollisionHandler for EnemyBlockCollisionHandler {
         let collision_response = resolve_collision_general(object, velocity, other);
         if other.pos.y / 16.0 == object.pos.y / 16.0 {
             // if goomba is on the same level as block, reverse direction
-            let new_pos = Vec2::new(
-                collision_response.new_pos.x - (2.0 * collision_response.new_velocity.x.signum()),
-                collision_response.new_pos.y,
-            ); // move goomba back a bit, otherwise it will get stuck
+            let new_pos = Vec2::new(collision_response.new_pos.x, collision_response.new_pos.y); // move goomba back a bit, otherwise it will get stuck
             return CollisionResponse {
                 new_pos,
-                new_velocity: Vec2::new(
-                    -collision_response.new_velocity.x,
-                    collision_response.new_velocity.y,
-                ),
+                new_velocity: Vec2::new(-velocity.x, velocity.y),
                 collided: collision_response.collided,
                 collision_type: Some(CollisionType::EnemyWithBlock),
             };
@@ -262,17 +252,10 @@ trait Updatable {
                     collision_handler.resolve_collision(self.object(), self.velocity(), other);
 
                 if collision_response.collided {
-                    self.mut_object().pos = collision_response.new_pos;
                     *self.mut_velocity() = collision_response.new_velocity;
+                    self.mut_object().pos = collision_response.new_pos;
                 }
-                if self.object().object_type == ObjectType::Player
-                    && other.object_type == ObjectType::Enemy(EnemyType::Goomba)
-                {
-                    println!(
-                        "Player collided with enemy {:?}",
-                        collision_response.collision_type
-                    );
-                }
+
                 if let Some(collision_type) = collision_response.collision_type {
                     possible_game_events = Some(Vec::new());
                     let game_event = match collision_type {
@@ -286,11 +269,14 @@ trait Updatable {
                             triggered_by: other.clone(),
                             target: Some(self.object().clone()),
                         },
+
                         _ => continue,
                     };
                     if let Some(mut events) = possible_game_events {
                         events.push(game_event);
                         possible_game_events = Some(events);
+                    } else {
+                        possible_game_events = Some(vec![game_event]);
                     }
                 }
             }
@@ -371,7 +357,6 @@ enum BlockType {
 #[derive(PartialEq, Clone, Copy, Debug)]
 enum EnemyType {
     Goomba,
-    Koopa,
 }
 
 #[derive(PartialEq, Clone, Copy, Debug)]
@@ -379,7 +364,6 @@ enum ObjectType {
     Block(BlockType),
     Enemy(EnemyType),
     Player,
-    PowerUp,
 }
 
 #[derive(Clone, Debug)]
@@ -406,18 +390,9 @@ impl PartialEq for Object {
         self.pos == other.pos && self.object_type == other.object_type
     }
 }
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-enum PlayerMovementState {
-    Idle,
-    Running,
-    Turning,
-    Jumping, // Jumping and falling
-    RunningJump,
-}
 
 enum PlayerPowerupState {
     Small,
-    Big,
 }
 #[derive(Clone)]
 struct Animate {
@@ -472,7 +447,6 @@ struct Player {
     max_speed: i32,
     velocity: Vec2,
     is_grounded: bool,
-    powerup_state: PlayerPowerupState,
     animate: Animate,
 }
 impl Updatable for Player {
@@ -577,7 +551,6 @@ impl Player {
             max_speed,
             velocity: Vec2::new(0.0, 0.0),
             is_grounded: false,
-            powerup_state: PlayerPowerupState::Small,
             animate: Animate::new(1.0),
         };
         player
@@ -690,7 +663,6 @@ impl Updatable for Goomba {
             ObjectType::Block(_) => Box::new(EnemyBlockCollisionHandler),
             ObjectType::Enemy(EnemyType::Goomba) => Box::new(EnemyCollisionHandler),
             ObjectType::Player => Box::new(DoNothingCollisionHandler), // Goomba does not interact with player, player will handle goomba collision
-            _ => panic!("No collision handler for object type: {:?}", object_type),
         }
     }
     fn update_animation(&mut self) {
@@ -894,10 +866,9 @@ impl World {
         self.player = Player::new(48, 176, MAX_VELOCITY_X);
     }
     fn spawn_enemies(&mut self) {
-        self.add_object(Object::new(208, 176, ObjectType::Enemy(EnemyType::Goomba)));
-        self.add_object(Object::new(640, 176, ObjectType::Enemy(EnemyType::Goomba)));
-        self.add_object(Object::new(122, 11, ObjectType::Enemy(EnemyType::Goomba)));
+        self.add_object(Object::new(160, 176, ObjectType::Enemy(EnemyType::Goomba)));
         self.add_object(Object::new(224, 176, ObjectType::Enemy(EnemyType::Goomba)));
+        self.add_object(Object::new(640, 176, ObjectType::Enemy(EnemyType::Goomba)));
         self.add_object(Object::new(776, 176, ObjectType::Enemy(EnemyType::Goomba)));
         self.add_object(Object::new(876, 176, ObjectType::Enemy(EnemyType::Goomba)));
         self.add_object(Object::new(2648, 176, ObjectType::Enemy(EnemyType::Goomba)));
@@ -922,7 +893,6 @@ impl World {
             ObjectType::Block(_) => ObjectReference::Block(object),
             ObjectType::Enemy(_) => ObjectReference::Enemy(self.enemies.len() - 1),
             ObjectType::Player => ObjectReference::Player,
-            _ => panic!("Object type not implemented"),
         });
     }
 

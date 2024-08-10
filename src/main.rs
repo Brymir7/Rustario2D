@@ -1,11 +1,12 @@
 use image_utils::load_and_convert_texture;
+use macroquad::audio::{load_sound, play_sound, PlaySoundParams, Sound};
 use macroquad::prelude::*;
 use mario_config::mario_config::{
-    ACCELERATION, GRAVITY, JUMP_STRENGTH, MARIO_SPRITE_BLOCK_SIZE, MARIO_WORLD_SIZE,
-    MAX_VELOCITY_X, PHYSICS_FRAME_PER_SECOND, PHYSICS_FRAME_TIME, SCALE_IMAGE_FACTOR,
+    ACCELERATION, GRAVITY, JUMP_STRENGTH, MARIO_NON_MUSIC_VOLUME, MARIO_SPRITE_BLOCK_SIZE,
+    MARIO_WORLD_SIZE, MAX_VELOCITY_X, PHYSICS_FRAME_PER_SECOND, PHYSICS_FRAME_TIME,
+    SCALE_IMAGE_FACTOR, SOUND_VOLUME,
 };
 use preparation::LevelData;
-use std::cell::Ref;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::Read;
@@ -30,6 +31,7 @@ enum CollisionType {
     PlayerWithBlock,
     PlayerKillEnemy,
     PlayerHitBy,
+    PlayerWithPowerupBlock,
     PlayerWithPowerup,
     EnemyWithBlock,
     EnemyWithEnemy,
@@ -118,6 +120,27 @@ impl CollisionHandler for DoNothingCollisionHandler {
         }
     }
 }
+struct PowerupCollisionHandler;
+impl CollisionHandler for PowerupCollisionHandler {
+    fn resolve_collision(
+        &self,
+        object: &Object,
+        velocity: &Vec2,
+        other: &Object,
+    ) -> CollisionResponse {
+        let collision_response = resolve_collision_general(object, velocity, other);
+
+        if collision_response.collided {
+            return CollisionResponse {
+                new_pos: object.pos,
+                new_velocity: *velocity,
+                collided: collision_response.collided,
+                collision_type: Some(CollisionType::PlayerWithPowerup),
+            };
+        }
+        collision_response
+    }
+}
 struct BlockCollisionHandler;
 impl CollisionHandler for BlockCollisionHandler {
     fn resolve_collision(
@@ -126,7 +149,37 @@ impl CollisionHandler for BlockCollisionHandler {
         velocity: &Vec2,
         other: &Object,
     ) -> CollisionResponse {
-        return resolve_collision_general(object, velocity, other);
+        let collision_response = resolve_collision_general(object, velocity, other);
+        match other.object_type {
+            ObjectType::Block(BlockType::Block) => {
+                if collision_response.collided {
+                    return CollisionResponse {
+                        new_pos: collision_response.new_pos,
+                        new_velocity: collision_response.new_velocity,
+                        collided: collision_response.collided,
+                        collision_type: Some(CollisionType::PlayerWithBlock),
+                    };
+                }
+            }
+            ObjectType::Block(BlockType::PowerupBlock) => {
+                if collision_response.collided {
+                    return CollisionResponse {
+                        new_pos: collision_response.new_pos,
+                        new_velocity: collision_response.new_velocity,
+                        collided: collision_response.collided,
+                        collision_type: {
+                            if velocity.y < 0.0 {
+                                Some(CollisionType::PlayerWithPowerupBlock)
+                            } else {
+                                Some(CollisionType::PlayerWithBlock)
+                            }
+                        },
+                    };
+                }
+            }
+            _ => {}
+        }
+        collision_response
     }
 }
 struct EnemyCollisionHandler;
@@ -137,12 +190,18 @@ impl CollisionHandler for EnemyCollisionHandler {
         velocity: &Vec2,
         other: &Object,
     ) -> CollisionResponse {
-        // let collision_response = resolve_collision_general(object, velocity, other);
+        let collision_response = resolve_collision_general(object, velocity, other);
+        let new_velo = Vec2::new(-velocity.x, velocity.y);
+        let new_pos = Vec2::new(object.pos.x, object.pos.y);
+
         CollisionResponse {
-            new_pos: Vec2::new(object.pos.x - velocity.x * 2.0, object.pos.y), // keep old position, such that other goomba also inverts
-            new_velocity: Vec2::new(-velocity.x, velocity.y), // reverse direction, typical mario goomba | goomba collision
-            collided: true,
-            collision_type: Some(CollisionType::EnemyWithEnemy),
+            new_pos: new_pos,       // move goomba back a bit, otherwise it will get stuck
+            new_velocity: new_velo, // reverse direction, typical mario goomba | goomba collision
+            collided: collision_response.collided,
+            collision_type: match collision_response.collided {
+                true => Some(CollisionType::EnemyWithEnemy),
+                false => None,
+            },
         }
     }
 }
@@ -178,11 +237,11 @@ impl CollisionHandler for PlayerEnemyCollisionHandler {
     ) -> CollisionResponse {
         let collision_response = resolve_collision_general(object, velocity, other);
         if collision_response.collided {
-            println!("Player collided with enemy");
-            if object.pos.y < other.pos.y {
+            if (object.pos.y + object.height as f32) < (other.pos.y + other.height as f32) {
+                // because mario can be larger than goomba
                 return CollisionResponse {
                     new_pos: collision_response.new_pos,
-                    new_velocity: collision_response.new_velocity,
+                    new_velocity: Vec2::new(velocity.x, -3.0), // bounce up
                     collided: collision_response.collided,
                     collision_type: Some(CollisionType::PlayerKillEnemy),
                 };
@@ -211,88 +270,115 @@ trait Updatable {
         self.mut_velocity().y += GRAVITY as f32 * PHYSICS_FRAME_TIME;
     }
 
-    fn apply_x_axis_friction(&mut self) {
-        self.mut_velocity().x =
-            (self.velocity().x.abs() - 2.0 * PHYSICS_FRAME_TIME) * self.velocity().x.signum();
+    fn apply_x_axis_friction(&mut self, grounded: bool) {
+        if !grounded {
+            self.mut_velocity().x =
+                (self.velocity().x.abs() - 1.0 * PHYSICS_FRAME_TIME) * self.velocity().x.signum();
+        } else {
+            self.mut_velocity().x =
+                (self.velocity().x.abs() - 2.0 * PHYSICS_FRAME_TIME) * self.velocity().x.signum();
+        }
     }
     fn update_animation(&mut self) {}
     fn get_collision_handler(&self, object_type: ObjectType) -> Box<dyn CollisionHandler>; // this could be a trait enum?
     fn handle_world_border(&mut self, world_bounds: (usize, usize)) -> Option<GameEvent>;
     fn update(
         &mut self,
-        surrounding_objects: Vec<Object>,
+        surrounding_objects: &Vec<SurroundingObject>,
         world_bounds: (usize, usize),
-    ) -> Option<Vec<GameEvent>> {
-        let mut possible_game_events: Option<Vec<GameEvent>> = None;
+    ) -> Vec<GameEvent> {
         let self_center_x: f32 = self.object().pos.x + self.object().width as f32 / 2.0;
-        let block_below = surrounding_objects.iter().find(|obj| {
-            obj.pos.y > self.object().pos.y
-                && obj.pos.x < self_center_x
-                && obj.pos.x + obj.width as f32 > self_center_x
-                && matches!(
-                    obj.object_type,
-                    ObjectType::Block(BlockType::Block)
-                        | ObjectType::Block(BlockType::PowerupBlock)
-                )
-        });
+        let block_below = surrounding_objects
+            .iter()
+            .filter_map(|obj| match obj {
+                SurroundingObject::Object(obj) => Some(obj),
+                _ => None,
+            })
+            .find(|obj| {
+                obj.pos.y > self.object().pos.y
+                    && obj.pos.x < self_center_x
+                    && obj.pos.x + obj.width as f32 > self_center_x
+            });
 
         if block_below.is_none() {
             self.apply_gravity();
             self.set_grounded(false);
+            self.apply_x_axis_friction(false);
         } else {
             self.set_grounded(true);
-            self.apply_x_axis_friction();
+            self.apply_x_axis_friction(true);
         }
+
         let velocity = self.velocity().clone();
         self.mut_object().pos += velocity;
-
-        for other in surrounding_objects.iter() {
-            let collision_handler = self.get_collision_handler(other.object_type);
+        let mut game_events = Vec::new();
+        for other in surrounding_objects {
+            let (other_obj_type, other_obj) = self.extract_object_info(other);
+            let collision_handler = self.get_collision_handler(other_obj_type);
             let collision_response =
-                collision_handler.resolve_collision(self.object(), self.velocity(), other);
+                collision_handler.resolve_collision(self.object(), self.velocity(), other_obj);
 
-            if collision_response.collided {
-                *self.mut_velocity() = collision_response.new_velocity;
-                self.mut_object().pos = collision_response.new_pos;
-            }
-
-            if let Some(collision_type) = collision_response.collision_type {
-                possible_game_events = Some(Vec::new());
-                let game_event = match collision_type {
-                    CollisionType::PlayerKillEnemy => GameEvent {
-                        event: GameEventType::Kill,
-                        triggered_by: other.clone(),
-                        target: Some(self.object().clone()),
-                    },
-                    CollisionType::PlayerHitBy => GameEvent {
-                        event: GameEventType::PlayerHit,
-                        triggered_by: other.clone(),
-                        target: Some(self.object().clone()),
-                    },
-
-                    _ => continue,
-                };
-                if let Some(mut events) = possible_game_events {
-                    events.push(game_event);
-                    possible_game_events = Some(events);
-                } else {
-                    possible_game_events = Some(vec![game_event]);
+            match collision_response.collision_type {
+                Some(ref collision_type) => {
+                    let game_event = self.create_game_event(collision_type, other_obj);
+                    if let Some(event) = game_event {
+                        game_events.push(event);
+                    }
                 }
+                None => {}
+            }
+            if collision_response.collided {
+                self.update_position_and_velocity(&collision_response);
             }
         }
         let game_event = self.handle_world_border(world_bounds);
-        if let Some(game_event) = game_event {
-            if let Some(mut events) = possible_game_events {
-                events.push(game_event);
-                possible_game_events = Some(events);
-            } else {
-                possible_game_events = Some(vec![game_event]);
-            }
+        if let Some(event) = game_event {
+            game_events.push(event);
         }
         self.update_animation();
         self.animate().update();
 
-        possible_game_events
+        game_events
+    }
+    fn extract_object_info<'a>(&self, other: &'a SurroundingObject) -> (ObjectType, &'a Object) {
+        match other {
+            SurroundingObject::Object(obj) => (obj.object_type, obj),
+            SurroundingObject::Goomba(goomba) => (goomba.object.object_type, &goomba.object),
+        }
+    }
+    fn create_game_event(
+        &self,
+        collision_type: &CollisionType,
+        other: &Object,
+    ) -> Option<GameEvent> {
+        match collision_type {
+            CollisionType::PlayerKillEnemy => Some(GameEvent {
+                event: GameEventType::Kill,
+                triggered_by: self.object().clone(),
+                target: Some(other.clone()),
+            }),
+            CollisionType::PlayerHitBy => Some(GameEvent {
+                event: GameEventType::PlayerHit,
+                triggered_by: other.clone(),
+                target: Some(self.object().clone()),
+            }),
+            CollisionType::PlayerWithBlock => None,
+            CollisionType::PlayerWithPowerupBlock => Some(GameEvent {
+                event: GameEventType::PlayerHitPowerUpBlock,
+                triggered_by: self.object().clone(),
+                target: Some(other.clone()),
+            }),
+            CollisionType::PlayerWithPowerup => Some(GameEvent {
+                event: GameEventType::PlayerPowerUp,
+                triggered_by: self.object().clone(),
+                target: Some(other.clone()),
+            }),
+            _ => None,
+        }
+    }
+    fn update_position_and_velocity(&mut self, collision_response: &CollisionResponse) {
+        *self.mut_velocity() = collision_response.new_velocity;
+        self.mut_object().pos = collision_response.new_pos;
     }
 }
 
@@ -343,6 +429,10 @@ lazy_static! {
         load_and_convert_texture(include_bytes!("../sprites/Goomba2.png"), ImageFormat::Png),
         load_and_convert_texture(include_bytes!("../sprites/Goomba3.png"), ImageFormat::Png),
     ];
+    static ref POWERUP_SPRITE_LOOKUP: [Texture2D; 1] = [load_and_convert_texture(
+        include_bytes!("../sprites/Mushroom.png"),
+        ImageFormat::Png
+    ),];
 }
 
 #[derive(Clone, PartialEq, Copy, Debug)]
@@ -360,6 +450,7 @@ enum EnemyType {
 enum ObjectType {
     Block(BlockType),
     Enemy(EnemyType),
+    Powerup,
     Player,
 }
 
@@ -388,8 +479,10 @@ impl PartialEq for Object {
     }
 }
 
-enum PlayerPowerupState {
+enum PlayerState {
+    Dead,
     Small,
+    Big,
 }
 #[derive(Clone)]
 struct Animate {
@@ -444,6 +537,7 @@ struct Player {
     max_speed: i32,
     velocity: Vec2,
     is_grounded: bool,
+    power_state: PlayerState,
     animate: Animate,
 }
 impl Updatable for Player {
@@ -470,10 +564,12 @@ impl Updatable for Player {
     fn animate(&mut self) -> &mut Animate {
         &mut self.animate
     }
+
     fn get_collision_handler(&self, object_type: ObjectType) -> Box<dyn CollisionHandler> {
         match object_type {
             ObjectType::Block(_) => Box::new(BlockCollisionHandler),
             ObjectType::Enemy(EnemyType::Goomba) => Box::new(PlayerEnemyCollisionHandler),
+            ObjectType::Powerup => Box::new(PowerupCollisionHandler),
             _ => panic!("No collision handler for object type: {:?}", object_type),
         }
     }
@@ -548,6 +644,7 @@ impl Player {
             max_speed,
             velocity: Vec2::new(0.0, 0.0),
             is_grounded: false,
+            power_state: PlayerState::Small,
             animate: Animate::new(1.0),
         };
         player
@@ -555,12 +652,32 @@ impl Player {
             .change_animation_sprites(vec![MARIO_SPRITE_LOOKUP[0].clone()]);
         player
     }
-
+    fn power_up(&mut self) {
+        match self.power_state {
+            PlayerState::Small => {
+                self.power_state = PlayerState::Big;
+                self.object.height = (MARIO_SPRITE_BLOCK_SIZE as f32 * 1.5) as usize;
+            }
+            _ => {}
+        }
+    }
+    fn power_down(&mut self) {
+        match self.power_state {
+            PlayerState::Small => {
+                self.power_state = PlayerState::Dead;
+            }
+            PlayerState::Big => {
+                self.power_state = PlayerState::Small;
+                self.object.height = MARIO_SPRITE_BLOCK_SIZE;
+            }
+            _ => {}
+        }
+    }
     fn update(
         &mut self,
-        surrounding_objects: Vec<Object>,
+        surrounding_objects: &Vec<SurroundingObject>,
         world_bounds: (usize, usize),
-    ) -> Option<Vec<GameEvent>> {
+    ) -> Vec<GameEvent> {
         return Updatable::update(self, surrounding_objects, world_bounds);
     }
 
@@ -572,9 +689,16 @@ impl Player {
             .clamp(-self.max_speed as f32, self.max_speed as f32);
     }
 
-    fn jump(&mut self) {
+    fn jump(&mut self, sound: &Sound) {
         const VELOCITY: f32 = -JUMP_STRENGTH * PHYSICS_FRAME_TIME;
         if self.is_grounded {
+            play_sound(
+                sound,
+                PlaySoundParams {
+                    volume: MARIO_NON_MUSIC_VOLUME * SOUND_VOLUME,
+                    looped: false,
+                },
+            );
             self.velocity.y = -3.0;
             self.is_grounded = false;
         }
@@ -590,13 +714,13 @@ impl Player {
         if let Some(sprite_to_draw) = self.animate.current_frames_sprite() {
             draw_texture_ex(
                 &sprite_to_draw,
-                self.object.pos.x - camera_x as f32,
-                self.object.pos.y - camera_y as f32,
+                (self.object.pos.x - camera_x as f32) * SCALE_IMAGE_FACTOR as f32,
+                (self.object.pos.y - camera_y as f32) * SCALE_IMAGE_FACTOR as f32,
                 WHITE,
                 DrawTextureParams {
                     dest_size: Some(Vec2::new(
-                        self.object.width as f32 * SCALE_IMAGE_FACTOR,
-                        self.object.height as f32 * SCALE_IMAGE_FACTOR,
+                        (self.object.width * SCALE_IMAGE_FACTOR) as f32,
+                        (self.object.height * SCALE_IMAGE_FACTOR) as f32,
                     )),
                     flip_x: self.velocity.x < -0.1,
                     ..Default::default()
@@ -660,6 +784,7 @@ impl Updatable for Goomba {
             ObjectType::Block(_) => Box::new(EnemyBlockCollisionHandler),
             ObjectType::Enemy(EnemyType::Goomba) => Box::new(EnemyCollisionHandler),
             ObjectType::Player => Box::new(DoNothingCollisionHandler), // Goomba does not interact with player, player will handle goomba collision
+            ObjectType::Powerup => Box::new(EnemyCollisionHandler),
         }
     }
     fn update_animation(&mut self) {
@@ -690,9 +815,9 @@ impl Goomba {
     }
     fn update(
         &mut self,
-        surrounding_objects: Vec<Object>,
+        surrounding_objects: &Vec<SurroundingObject>,
         world_bounds: (usize, usize),
-    ) -> Option<Vec<GameEvent>> {
+    ) -> Vec<GameEvent> {
         self.velocity.x = 1.0 * self.velocity.x.signum(); // avoid friction atm;
         return Updatable::update(self, surrounding_objects, world_bounds);
     }
@@ -701,25 +826,17 @@ impl Goomba {
         if let Some(sprite_to_draw) = self.animate.current_frames_sprite() {
             draw_texture_ex(
                 &sprite_to_draw,
-                self.object.pos.x - camera_x as f32,
-                self.object.pos.y - camera_y as f32,
+                (self.object.pos.x - camera_x as f32) * SCALE_IMAGE_FACTOR as f32,
+                (self.object.pos.y - camera_y as f32) * SCALE_IMAGE_FACTOR as f32,
                 WHITE,
                 DrawTextureParams {
                     dest_size: Some(Vec2::new(
-                        self.object.width as f32 * SCALE_IMAGE_FACTOR,
-                        self.object.height as f32 * SCALE_IMAGE_FACTOR,
+                        (self.object.width * SCALE_IMAGE_FACTOR) as f32,
+                        (self.object.height * SCALE_IMAGE_FACTOR) as f32,
                     )),
                     flip_x: self.velocity.x < -0.1,
                     ..Default::default()
                 },
-            );
-            draw_rectangle_lines(
-                self.object.pos.x - camera_x as f32,
-                self.object.pos.y - camera_y as f32,
-                self.object.width as f32 * SCALE_IMAGE_FACTOR,
-                self.object.height as f32 * SCALE_IMAGE_FACTOR,
-                1.0,
-                RED,
             );
         }
     }
@@ -743,33 +860,141 @@ impl Camera {
 
     fn update(&mut self, player_x: usize, player_y: usize) {
         self.x = player_x.saturating_sub(self.width / 4);
+        self.x = self.x.clamp(0, MARIO_WORLD_SIZE.width - self.width);
         self.y = player_y.saturating_sub(self.height);
     }
 }
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 enum GameEventType {
     GameWon,
     GameOver,
     Kill,
     PlayerHit,
+    PlayerPowerUp,
+    PlayerHitPowerUpBlock,
 }
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct GameEvent {
     event: GameEventType,
     triggered_by: Object,
     target: Option<Object>,
 }
+#[derive(PartialEq)]
 enum GameState {
     Playing,
     GameWon,
     GameOver,
+    Frozen(f32),
 }
 #[derive(Clone)]
 enum ObjectReference {
     Block(Object),
     Enemy(usize), // Index into the self.enemies vector
     Player,
+    Powerup(usize),
     None,
+}
+enum SurroundingObject {
+    // relevant to be able to handle other object's velocity if needed in collision
+    Object(Object),
+    Goomba(Goomba),
+}
+#[derive(Clone)]
+struct PowerUp {
+    object: Object,
+    velocity: Vec2,
+    animate: Animate,
+}
+impl Updatable for PowerUp {
+    fn mut_object(&mut self) -> &mut Object {
+        &mut self.object
+    }
+
+    fn mut_velocity(&mut self) -> &mut Vec2 {
+        &mut self.velocity
+    }
+
+    fn object(&self) -> &Object {
+        &self.object
+    }
+
+    fn velocity(&self) -> &Vec2 {
+        &self.velocity
+    }
+
+    fn set_grounded(&mut self, _: bool) {}
+
+    fn animate(&mut self) -> &mut Animate {
+        &mut self.animate
+    }
+
+    fn get_collision_handler(&self, other: ObjectType) -> Box<dyn CollisionHandler> {
+        match other {
+            ObjectType::Block(_) => Box::new(EnemyBlockCollisionHandler), // powerup behaves like enemy
+            _ => Box::new(DoNothingCollisionHandler),
+        }
+    }
+
+    fn handle_world_border(&mut self, world_bounds: (usize, usize)) -> Option<GameEvent> {
+        if self.object.pos.x < 0.0 {
+            self.object.pos.x = 0.0;
+            self.velocity.x = 0.0;
+        }
+        if self.object.pos.x + self.object.width as f32 > world_bounds.0 as f32 {
+            self.object.pos.x = world_bounds.0 as f32 - self.object.width as f32;
+            self.velocity.x = 0.0;
+        }
+        if self.object.pos.y > world_bounds.1 as f32 {
+            return Some(GameEvent {
+                event: GameEventType::Kill,
+                triggered_by: self.object.clone(),
+                target: None,
+            });
+        }
+        None
+    }
+    fn update_animation(&mut self) {
+        self.animate.update();
+    }
+}
+
+impl PowerUp {
+    fn new(x: usize, y: usize) -> PowerUp {
+        let mut powerup = PowerUp {
+            object: Object::new(x, y, ObjectType::Powerup),
+            velocity: Vec2::new(1.0, 0.0),
+            animate: Animate::new(1.0),
+        };
+        powerup
+            .animate
+            .change_animation_sprites(POWERUP_SPRITE_LOOKUP.to_vec());
+        powerup
+    }
+    fn update(
+        &mut self,
+        surrounding_objects: &Vec<SurroundingObject>,
+        world_bounds: (usize, usize),
+    ) -> Vec<GameEvent> {
+        self.velocity.x = 1.0 * self.velocity.x.signum(); // avoid friction atm;
+        return Updatable::update(self, surrounding_objects, world_bounds);
+    }
+    fn draw(&self, camera_x: usize, camera_y: usize) {
+        if let Some(sprite_to_draw) = self.animate.current_frames_sprite() {
+            draw_texture_ex(
+                &sprite_to_draw,
+                (self.object.pos.x - camera_x as f32) * SCALE_IMAGE_FACTOR as f32,
+                (self.object.pos.y - camera_y as f32) * SCALE_IMAGE_FACTOR as f32,
+                WHITE,
+                DrawTextureParams {
+                    dest_size: Some(Vec2::new(
+                        (self.object.width * SCALE_IMAGE_FACTOR) as f32,
+                        (self.object.height * SCALE_IMAGE_FACTOR) as f32,
+                    )),
+                    ..Default::default()
+                },
+            );
+        }
+    }
 }
 struct World {
     height: usize,
@@ -777,9 +1002,11 @@ struct World {
     objects: Vec<Vec<ObjectReference>>,
     player: Player,
     enemies: Vec<Goomba>,
+    powerups: Vec<PowerUp>,
     camera: Camera,
     game_state: GameState,
     level_texture: Option<Texture2D>,
+    sounds: Option<(Sound, Sound, Sound)>,
 }
 
 impl World {
@@ -792,9 +1019,11 @@ impl World {
             objects,
             player: Player::new(48, 176, 6),
             enemies: Vec::new(),
+            powerups: Vec::new(),
             camera: Camera::new(600, height),
             game_state: GameState::Playing,
             level_texture: None,
+            sounds: None,
         }
     }
 
@@ -812,11 +1041,13 @@ impl World {
         let tilesheet = load_texture("sprites/tilesheet.png")
             .await
             .expect("Failed to load tilesheet");
+        tilesheet.set_filter(FilterMode::Nearest);
         let mut render_target_camera =
             Camera2D::from_display_rect(Rect::new(0., 0., self.width as f32, self.height as f32));
 
         let level_render_target = render_target(self.width as u32, self.height as u32);
         render_target_camera.render_target = Some(level_render_target);
+
         {
             set_camera(&render_target_camera);
             for (index, tile) in level_data.tiles.iter().enumerate() {
@@ -839,10 +1070,6 @@ impl World {
                             w: MARIO_SPRITE_BLOCK_SIZE as f32,
                             h: MARIO_SPRITE_BLOCK_SIZE as f32,
                         }),
-                        dest_size: Some(Vec2::new(
-                            MARIO_SPRITE_BLOCK_SIZE as f32 * SCALE_IMAGE_FACTOR,
-                            MARIO_SPRITE_BLOCK_SIZE as f32 * SCALE_IMAGE_FACTOR,
-                        )),
                         ..Default::default()
                     },
                 );
@@ -856,6 +1083,23 @@ impl World {
         self.level_texture = Some(render_texture); // to draw in one call, while keeping compressed json instead of loading a .png
     }
 
+    async fn load_sounds(&mut self) -> (Sound, Sound, Sound) {
+        let jump_sound = load_sound("sounds/mario_jump.wav")
+            .await
+            .expect("Failed to load jump sound");
+        let overworld_sound = load_sound("sounds/overworld.wav")
+            .await
+            .expect("Failed to load overworld sound");
+        let powerup_sound = load_sound("sounds/powerup.wav")
+            .await
+            .expect("Failed to load powerup sound");
+        self.sounds = Some((
+            jump_sound.clone(),
+            overworld_sound.clone(),
+            powerup_sound.clone(),
+        ));
+        (jump_sound, overworld_sound, powerup_sound)
+    }
     async fn load_player(&mut self) {
         self.player = Player::new(48, 176, MAX_VELOCITY_X);
     }
@@ -872,14 +1116,17 @@ impl World {
         let x = (object.pos.x / 16.0) as usize;
         let y = (object.pos.y / 16.0) as usize;
         if y > self.objects.len() - 1 || x > self.objects[y].len() - 1 {
-            println!("Object out of bounds at x: {}, y: {}", x, y);
             return;
         }
         let pos = object.pos;
         match object.object_type {
             ObjectType::Enemy(EnemyType::Goomba) => {
                 self.enemies
-                    .push(Goomba::new(pos.x as usize, pos.y as usize, 2));
+                    .push(Goomba::new(pos.x as usize, pos.y as usize, 1));
+            }
+            ObjectType::Powerup => {
+                self.powerups
+                    .push(PowerUp::new(pos.x as usize, pos.y as usize));
             }
             _ => {}
         }
@@ -888,12 +1135,33 @@ impl World {
                 ObjectType::Block(_) => ObjectReference::Block(object),
                 ObjectType::Enemy(_) => ObjectReference::Enemy(self.enemies.len() - 1),
                 ObjectType::Player => ObjectReference::Player,
+                ObjectType::Powerup => ObjectReference::Powerup(self.powerups.len()),
             };
         } else {
             panic!("Tried to add object where: Object already exists");
         }
     }
-
+    fn update_object(&mut self, object: Object) {
+        let x = (object.pos.x / 16.0) as usize;
+        let y = (object.pos.y / 16.0) as usize;
+        if y > self.objects.len() - 1 || x > self.objects[y].len() - 1 {
+            return;
+        }
+        let pos = object.pos;
+        match object.object_type {
+            ObjectType::Enemy(EnemyType::Goomba) => {
+                self.enemies
+                    .push(Goomba::new(pos.x as usize, pos.y as usize, 1));
+            }
+            _ => {}
+        }
+        self.objects[y][x] = match object.object_type {
+            ObjectType::Block(_) => ObjectReference::Block(object),
+            ObjectType::Enemy(_) => ObjectReference::Enemy(self.enemies.len() - 1),
+            ObjectType::Player => ObjectReference::Player,
+            ObjectType::Powerup => ObjectReference::Block(object),
+        };
+    }
     fn handle_input(&mut self) {
         if is_key_down(KeyCode::Right) || is_key_down(KeyCode::D) {
             self.player
@@ -904,14 +1172,21 @@ impl World {
                 .add_horizontal_velocity(-ACCELERATION * PHYSICS_FRAME_TIME);
         }
         if is_key_down(KeyCode::Space) {
-            self.player.jump();
+            self.player.jump(
+                &self
+                    .sounds
+                    .as_ref()
+                    .expect("Initialize sounds before handling input!")
+                    .0,
+            );
         }
     }
     fn get_surrounding_objects(
         objects: &Vec<Vec<ObjectReference>>,
         enemies: &Vec<Goomba>,
+        powerups: &Vec<PowerUp>,
         object: &Object,
-    ) -> Vec<Object> {
+    ) -> Vec<SurroundingObject> {
         let surrounding_objects_refs = DIRECTIONS
             .iter()
             .filter_map(|(dy, dx)| {
@@ -932,21 +1207,27 @@ impl World {
         surrounding_objects_refs
             .iter()
             .filter_map(|reference| match reference {
-                ObjectReference::Block(object) => Some(object.clone()),
+                ObjectReference::Block(object) => Some(SurroundingObject::Object(object.clone())),
                 ObjectReference::Enemy(index) => {
-                    if *index > enemies.len() - 1 {
+                    if enemies.len() <= *index {
                         return None;
                     }
-                    let enemy = enemies[*index].clone();
-                    Some(enemy.object)
+                    let enemy = &enemies[*index];
+                    Some(SurroundingObject::Goomba(enemy.clone()))
                 }
                 ObjectReference::Player => None,
+                ObjectReference::Powerup(powerup) => {
+                    if powerups.len() <= *powerup {
+                        return None;
+                    }
+                    let powerup = &powerups[*powerup];
+                    Some(SurroundingObject::Object(powerup.object.clone()))
+                }
                 ObjectReference::None => None,
             })
-            .collect::<Vec<Object>>()
+            .collect()
     }
     fn handle_game_event(&mut self, game_event: GameEvent) {
-        println!("Game event: {:?}", game_event.event);
         match game_event.event {
             GameEventType::GameWon => {
                 self.game_state = GameState::GameWon;
@@ -955,18 +1236,77 @@ impl World {
                 self.game_state = GameState::GameOver;
             }
             GameEventType::Kill => {
-                let obj_idx_x = (game_event.triggered_by.pos.x / 16.0).round() as usize;
-                let obj_idx_y = (game_event.triggered_by.pos.y / 16.0).round() as usize;
-                self.enemies
-                    .retain(|enemy| enemy.object != game_event.triggered_by);
-                self.objects[obj_idx_y][obj_idx_x] = ObjectReference::None;
+                if let Some(target) = game_event.target {
+                    let obj_idx_x: usize = (target.pos.x / 16.0).round() as usize;
+                    let obj_idx_y = (target.pos.y / 16.0).round() as usize;
+                    self.enemies.retain(|enemy| enemy.object != target);
+                    self.objects[obj_idx_y][obj_idx_x] = ObjectReference::None;
+                }
             }
-            GameEventType::PlayerHit => {}
+            GameEventType::PlayerHit => {
+                self.player.power_down();
+
+                let enemy_obj = game_event.triggered_by;
+                let enemy_goomba = self
+                    .enemies
+                    .iter_mut()
+                    .find(|enemy| enemy.object == enemy_obj);
+                if let Some(enemy) = enemy_goomba {
+                    enemy.velocity.x *= -1.0 * self.player.velocity.x.signum();
+                    enemy.object.pos =
+                        Vec2::new(enemy.object.pos.x + enemy.velocity.x, enemy.object.pos.y);
+                }
+                self.game_state = GameState::Frozen(2.0);
+                match self.player.power_state {
+                    PlayerState::Dead => {
+                        self.game_state = GameState::GameOver;
+                    }
+                    _ => {}
+                }
+            } // handled here because it can lead to game over, so we will handle powerup state in general here
+            GameEventType::PlayerPowerUp => {
+                self.player.power_up();
+                if let Some(target) = game_event.target {
+                    let obj_idx_x: usize = (target.pos.x / 16.0).round() as usize;
+                    let obj_idx_y = (target.pos.y / 16.0).round() as usize;
+                    self.objects[obj_idx_y][obj_idx_x] = ObjectReference::None;
+                    self.powerups.retain(|powerup| powerup.object != target);
+                }
+                play_sound(
+                    &self
+                        .sounds
+                        .as_ref()
+                        .expect("Initialize sounds before handling game event!")
+                        .2,
+                    PlaySoundParams {
+                        volume: SOUND_VOLUME,
+                        looped: false,
+                    },
+                );
+            }
+            GameEventType::PlayerHitPowerUpBlock => {
+                if let Some(target) = game_event.target {
+                    let obj_idx_x: usize = (target.pos.x / 16.0).round() as usize;
+                    let obj_idx_y = (target.pos.y / 16.0).round() as usize;
+                    self.objects[obj_idx_y][obj_idx_x] = ObjectReference::None;
+                    self.update_object(Object::new(
+                        target.pos.x as usize,
+                        target.pos.y as usize,
+                        ObjectType::Block(BlockType::Block),
+                    ));
+
+                    self.add_object(Object::new(
+                        target.pos.x as usize,
+                        target.pos.y as usize - 2 * 16,
+                        ObjectType::Powerup,
+                    ));
+                }
+            }
         }
     }
 
     fn update(&mut self) {
-        let mut game_events = Vec::new();
+        let mut vec_of_game_events = Vec::new();
         for i in 0..self.enemies.len() {
             let (before, after) = self.enemies.split_at_mut(i);
             let (enemy, after) = &mut after.split_at_mut(1);
@@ -977,14 +1317,18 @@ impl World {
                 .map(|e| (*e).clone())
                 .collect();
             let enemy = &mut enemy[0];
-            let surrounding_objects =
-                Self::get_surrounding_objects(&self.objects, &other_enemies, &enemy.object);
+            let surrounding_objects = Self::get_surrounding_objects(
+                &self.objects,
+                &other_enemies,
+                &self.powerups,
+                &enemy.object,
+            );
 
             let old_x = (enemy.object.pos.x / 16.0).round() as usize;
             let old_y = (enemy.object.pos.y / 16.0).round() as usize;
 
-            let game_event = enemy.update(surrounding_objects, (self.width, self.height));
-            game_events.push(game_event);
+            let game_event = enemy.update(&surrounding_objects, (self.width, self.height));
+            vec_of_game_events.push(game_event);
 
             let new_x = (enemy.object.pos.x / 16.0).round() as usize;
             let new_y = (enemy.object.pos.y / 16.0).round() as usize;
@@ -995,46 +1339,103 @@ impl World {
             self.objects[old_y][old_x] = ObjectReference::None;
             self.objects[new_y][new_x] = ObjectReference::Enemy(i);
         }
+        for i in 0..self.powerups.len() {
+            let (before, after) = self.powerups.split_at_mut(i);
+            let (powerup, after) = &mut after.split_at_mut(1);
 
+            let other_powerups: Vec<PowerUp> = before
+                .iter_mut()
+                .chain(after.iter_mut().skip(1))
+                .map(|e| (*e).clone())
+                .collect();
+            let powerup = &mut powerup[0];
+            let surrounding_objects = Self::get_surrounding_objects(
+                &self.objects,
+                &self.enemies,
+                &other_powerups,
+                &powerup.object,
+            );
+
+            let old_x = (powerup.object.pos.x / 16.0).round() as usize;
+            let old_y = (powerup.object.pos.y / 16.0).round() as usize;
+
+            let game_event = powerup.update(&surrounding_objects, (self.width, self.height));
+            vec_of_game_events.push(game_event);
+
+            let new_x = (powerup.object.pos.x / 16.0).round() as usize;
+            let new_y = (powerup.object.pos.y / 16.0).round() as usize;
+
+            if old_x == new_x && old_y == new_y {
+                continue;
+            }
+            self.objects[old_y][old_x] = ObjectReference::None;
+            if new_y >= self.objects.len() || new_x >= self.objects[new_y].len() {
+                continue;
+            }
+            self.objects[new_y][new_x] = ObjectReference::Powerup(i);
+        }
         let player_old_x = (self.player.object.pos.x / 16.0).round() as usize;
         let player_old_y = (self.player.object.pos.y / 16.0).round() as usize;
         self.objects[player_old_y][player_old_x] = ObjectReference::None;
-        let player_surrounding_objects: Vec<Object> =
-            Self::get_surrounding_objects(&self.objects, &self.enemies, &self.player.object);
+        let player_surrounding_objects: Vec<SurroundingObject> = Self::get_surrounding_objects(
+            &self.objects,
+            &self.enemies,
+            &self.powerups,
+            &self.player.object,
+        );
 
         let game_event = self
             .player
-            .update(player_surrounding_objects, (self.width, self.height));
-        game_events.push(game_event);
+            .update(&player_surrounding_objects, (self.width, self.height));
+        vec_of_game_events.push(game_event);
+
+        for game_events in vec_of_game_events {
+            for game_event in game_events {
+                self.handle_game_event(game_event.clone());
+                match game_event.event {
+                    GameEventType::GameOver => {
+                        return;
+                    }
+                    GameEventType::GameWon => {
+                        return;
+                    }
+                    _ => {}
+                }
+            }
+        }
         let player_new_x = (self.player.object.pos.x / 16.0).round() as usize;
         let player_new_y = (self.player.object.pos.y / 16.0).round() as usize;
-        assert!(
-            player_new_y < self.objects.len() && player_new_x < self.objects[player_new_y].len(),
-            "Player out of bounds",
-        );
+
+        if player_new_y >= self.objects.len() || player_new_x >= self.objects[player_new_y].len() {
+            return;
+        }
         self.objects[player_new_y][player_new_x] = ObjectReference::Player;
 
         self.camera.update(
             self.player.object.pos.x as usize,
             self.player.object.pos.y as usize,
         );
-
-        for game_event_queue in game_events {
-            if let Some(game_event_q) = game_event_queue {
-                for game_event in game_event_q {
-                    self.handle_game_event(game_event);
-                }
-            }
-        }
     }
 
     fn draw(&self) {
         match self.game_state {
             GameState::GameOver => {
-                draw_text("Game Over", 200.0, 200.0, 40.0, RED);
+                draw_text(
+                    "Game Over",
+                    200.0 * SCALE_IMAGE_FACTOR as f32,
+                    150.0 * SCALE_IMAGE_FACTOR as f32,
+                    40.0,
+                    RED,
+                );
             }
             GameState::GameWon => {
-                draw_text("You Won!", 200.0, 200.0, 40.0, GREEN);
+                draw_text(
+                    "You Won!",
+                    200.0 * SCALE_IMAGE_FACTOR as f32,
+                    150.0 * SCALE_IMAGE_FACTOR as f32,
+                    40.0,
+                    GREEN,
+                );
             }
             _ => {
                 if let Some(level_texture) = &self.level_texture {
@@ -1051,16 +1452,28 @@ impl World {
                                 self.camera.height as f32,
                             )),
                             dest_size: Some(Vec2::new(
-                                self.camera.width as f32 * SCALE_IMAGE_FACTOR,
-                                self.camera.height as f32 * SCALE_IMAGE_FACTOR,
+                                (self.camera.width * SCALE_IMAGE_FACTOR) as f32,
+                                (self.camera.height * SCALE_IMAGE_FACTOR) as f32,
                             )),
                             flip_y: true,
                             ..Default::default()
                         },
                     );
+                    if let GameState::Frozen(frozen_time) = self.game_state {
+                        draw_text(
+                            &format!("Paused: {:.2}", frozen_time),
+                            200.0 * SCALE_IMAGE_FACTOR as f32,
+                            150.0 * SCALE_IMAGE_FACTOR as f32,
+                            40.0,
+                            WHITE,
+                        );
+                    }
                 }
                 for enemy in &self.enemies {
                     enemy.draw(self.camera.x, self.camera.y);
+                }
+                for powerup in &self.powerups {
+                    powerup.draw(self.camera.x, self.camera.y);
                 }
                 self.player.draw(self.camera.x, self.camera.y);
             }
@@ -1073,7 +1486,7 @@ fn window_conf() -> Conf {
         window_title: "Rustario Bros".to_owned(),
         window_width: 600 * SCALE_IMAGE_FACTOR as i32,
         window_height: MARIO_WORLD_SIZE.height as i32 * SCALE_IMAGE_FACTOR as i32,
-        window_resizable: false,
+        window_resizable: true,
         high_dpi: true,
         fullscreen: false,
         sample_count: 1,
@@ -1084,15 +1497,19 @@ fn window_conf() -> Conf {
 #[macroquad::main(window_conf)]
 async fn main() {
     preparation::main();
-    println!("Finished preparing level data");
-
     let mut world = World::new(MARIO_WORLD_SIZE.height, MARIO_WORLD_SIZE.width);
 
+    let (_, overworld_sound, _) = world.load_sounds().await;
+    play_sound(
+        &overworld_sound,
+        PlaySoundParams {
+            looped: true,
+            volume: SOUND_VOLUME,
+        },
+    );
     world.load_level().await;
     world.spawn_enemies();
     world.load_player().await;
-    println!("Finished loading level");
-
     let mut elapsed_time = 0.0;
     let target_time_step = 1.0 / PHYSICS_FRAME_PER_SECOND;
 
@@ -1101,9 +1518,18 @@ async fn main() {
 
         elapsed_time += get_frame_time();
         while elapsed_time >= target_time_step {
+            if let GameState::Frozen(frozen_time) = world.game_state {
+                world.game_state = GameState::Frozen(frozen_time - get_frame_time());
+                if frozen_time - target_time_step <= 0.0 {
+                    world.game_state = GameState::Playing;
+                }
+                break;
+            } else if world.game_state != GameState::Playing {
+                break;
+            }
             world.handle_input();
             world.update();
-            elapsed_time -= target_time_step;
+            elapsed_time = 0.0;
         }
 
         world.draw();

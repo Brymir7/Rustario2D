@@ -1,11 +1,14 @@
 pub mod mario_config {
-    pub const MARIO_SPRITE_BLOCK_SIZE: usize = 16;
+
     pub const GRAVITY: usize = 16;
     pub struct WorldDimensions {
         pub width: usize,
         pub height: usize,
     }
-    pub const SCALE_IMAGE_FACTOR: f32 = 1.0; // bugged if not 1.0
+    pub const MARIO_NON_MUSIC_VOLUME: f32 = 0.1;
+    pub const SOUND_VOLUME: f32 = 0.3;
+    pub const SCALE_IMAGE_FACTOR: usize = 2;
+    pub const MARIO_SPRITE_BLOCK_SIZE: usize = 16;
     pub const MARIO_WORLD_SIZE: WorldDimensions = WorldDimensions {
         width: 3392,
         height: 224,

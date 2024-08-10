@@ -368,6 +368,15 @@ trait Updatable {
                 triggered_by: self.object().clone(),
                 target: Some(other.clone()),
             }),
+            CollisionType::EnemyWithBlock => None,
+            CollisionType::EnemyWithEnemy => {
+                // Goomba collision with goomba
+                Some(GameEvent {
+                    event: GameEventType::EnemyCollEnemy,
+                    triggered_by: self.object().clone(),
+                    target: Some(other.clone()),
+                })
+            }
             CollisionType::PlayerWithPowerup => Some(GameEvent {
                 event: GameEventType::PlayerPowerUp,
                 triggered_by: self.object().clone(),
@@ -782,7 +791,7 @@ impl Updatable for Goomba {
     fn get_collision_handler(&self, object_type: ObjectType) -> Box<dyn CollisionHandler> {
         match object_type {
             ObjectType::Block(_) => Box::new(EnemyBlockCollisionHandler),
-            ObjectType::Enemy(EnemyType::Goomba) => Box::new(EnemyCollisionHandler),
+            ObjectType::Enemy(_) => Box::new(EnemyCollisionHandler),
             ObjectType::Player => Box::new(DoNothingCollisionHandler), // Goomba does not interact with player, player will handle goomba collision
             ObjectType::Powerup => Box::new(EnemyCollisionHandler),
         }
@@ -872,6 +881,7 @@ enum GameEventType {
     PlayerHit,
     PlayerPowerUp,
     PlayerHitPowerUpBlock,
+    EnemyCollEnemy,
 }
 #[derive(Debug, Clone)]
 struct GameEvent {
@@ -931,6 +941,7 @@ impl Updatable for PowerUp {
     fn get_collision_handler(&self, other: ObjectType) -> Box<dyn CollisionHandler> {
         match other {
             ObjectType::Block(_) => Box::new(EnemyBlockCollisionHandler), // powerup behaves like enemy
+            ObjectType::Enemy(_) => Box::new(EnemyCollisionHandler),
             _ => Box::new(DoNothingCollisionHandler),
         }
     }
@@ -1284,6 +1295,31 @@ impl World {
                     },
                 );
             }
+            GameEventType::EnemyCollEnemy => {
+                if let (Some(target1), target2) = (game_event.target, game_event.triggered_by) {
+                    let mut enemy1 = None;
+                    let mut enemy2 = None;
+
+                    for enemy in &mut self.enemies {
+                        if enemy.object == target1 {
+                            enemy1 = Some(enemy);
+                        } else if enemy.object == target2 {
+                            enemy2 = Some(enemy);
+                        }
+
+                        if enemy1.is_some() && enemy2.is_some() {
+                            break;
+                        }
+                    }
+
+                    if let (Some(e1), Some(e2)) = (enemy1, enemy2) {
+                        if e1.velocity.x.signum() == e2.velocity.x.signum() {
+                            e1.velocity.x *= -1.0;
+                        }
+                        assert!(e1.velocity.x.signum() != e2.velocity.x.signum());
+                    }
+                }
+            }
             GameEventType::PlayerHitPowerUpBlock => {
                 if let Some(target) = game_event.target {
                     let obj_idx_x: usize = (target.pos.x / 16.0).round() as usize;
@@ -1336,7 +1372,13 @@ impl World {
             if old_x == new_x && old_y == new_y {
                 continue;
             }
+            if old_y >= self.objects.len() || old_x >= self.objects[old_y].len() {
+                continue;
+            }
             self.objects[old_y][old_x] = ObjectReference::None;
+            if new_y >= self.objects.len() || new_x >= self.objects[new_y].len() {
+                continue;
+            }
             self.objects[new_y][new_x] = ObjectReference::Enemy(i);
         }
         for i in 0..self.powerups.len() {
@@ -1366,6 +1408,9 @@ impl World {
             let new_y = (powerup.object.pos.y / 16.0).round() as usize;
 
             if old_x == new_x && old_y == new_y {
+                continue;
+            }
+            if old_y >= self.objects.len() || old_x >= self.objects[old_y].len() {
                 continue;
             }
             self.objects[old_y][old_x] = ObjectReference::None;
@@ -1486,7 +1531,7 @@ fn window_conf() -> Conf {
         window_title: "Rustario Bros".to_owned(),
         window_width: 600 * SCALE_IMAGE_FACTOR as i32,
         window_height: MARIO_WORLD_SIZE.height as i32 * SCALE_IMAGE_FACTOR as i32,
-        window_resizable: true,
+        window_resizable: false,
         high_dpi: true,
         fullscreen: false,
         sample_count: 1,

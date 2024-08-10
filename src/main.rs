@@ -1133,7 +1133,7 @@ impl World {
         match object.object_type {
             ObjectType::Enemy(EnemyType::Goomba) => {
                 self.enemies
-                    .push(Goomba::new(pos.x as usize, pos.y as usize, 1));
+                    .push(Goomba::new(pos.x as usize, pos.y as usize, 2));
             }
             ObjectType::Powerup => {
                 self.powerups
@@ -1256,7 +1256,7 @@ impl World {
             }
             GameEventType::PlayerHit => {
                 self.player.power_down();
-
+                self.player.apply_gravity();
                 let enemy_obj = game_event.triggered_by;
                 let enemy_goomba = self
                     .enemies

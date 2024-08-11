@@ -1017,6 +1017,8 @@ struct World {
     camera: Camera,
     game_state: GameState,
     level_texture: Option<Texture2D>,
+    level_render_target: Option<RenderTarget>, // to update level texture, if using index buffer + tilesheet + shader then this is not needed
+    tilesheet: Option<Texture2D>, // to update level texture, if using index buffer + tilesheet + shader then this would not be needed as it would be in GPU
     sounds: Option<(Sound, Sound, Sound)>,
 }
 
@@ -1034,6 +1036,8 @@ impl World {
             camera: Camera::new(600, height),
             game_state: GameState::Playing,
             level_texture: None,
+            level_render_target: None,
+            tilesheet: None,
             sounds: None,
         }
     }
@@ -1057,7 +1061,9 @@ impl World {
             Camera2D::from_display_rect(Rect::new(0., 0., self.width as f32, self.height as f32));
 
         let level_render_target = render_target(self.width as u32, self.height as u32);
+        self.level_render_target = Some(level_render_target.clone());
         render_target_camera.render_target = Some(level_render_target);
+
 
         {
             set_camera(&render_target_camera);
@@ -1090,8 +1096,10 @@ impl World {
             }
         }
         set_default_camera();
+
         let render_texture = render_target_camera.render_target.unwrap().texture;
         self.level_texture = Some(render_texture); // to draw in one call, while keeping compressed json instead of loading a .png
+        self.tilesheet = Some(tilesheet);
     }
 
     async fn load_sounds(&mut self){
@@ -1275,7 +1283,7 @@ impl World {
                     self.objects[obj_idx_y][obj_idx_x] = ObjectReference::None;
                 }
             }
-            GameEventType::PlayerHit => {
+            GameEventType::PlayerHit => { // handled here because it can lead to game over, so we will handle powerup state in general here
                 self.player.power_down();
                 self.player.apply_gravity();
                 let enemy_obj = game_event.triggered_by;
@@ -1295,7 +1303,7 @@ impl World {
                     }
                     _ => {}
                 }
-            } // handled here because it can lead to game over, so we will handle powerup state in general here
+            } 
             GameEventType::PlayerPowerUp => {
                 self.player.power_up();
                 if let Some(target) = game_event.target {
@@ -1351,7 +1359,7 @@ impl World {
                         target.pos.y as usize,
                         ObjectType::Block(BlockType::Block),
                     ));
-
+                    self.update_level_texture(10, obj_idx_x, obj_idx_y);
                     self.add_object(Object::new(
                         target.pos.x as usize,
                         target.pos.y as usize - 2 * 16,
@@ -1490,6 +1498,35 @@ impl World {
         );
     }
 
+    fn update_level_texture(&mut self, sprite_id: usize, update_x: usize, update_y: usize) {
+        if let (Some(render_target), Some(tilesheet)) = (&self.level_render_target, &self.tilesheet) {
+            let mut render_target_camera = Camera2D::from_display_rect(Rect::new(0., 0., self.width as f32, self.height as f32));
+            render_target_camera.render_target = Some(render_target.clone());
+            set_camera(&render_target_camera);
+            let sprite_y = (sprite_id * MARIO_SPRITE_BLOCK_SIZE) as f32;
+
+            draw_texture_ex(
+                tilesheet,
+                update_x as f32 * MARIO_SPRITE_BLOCK_SIZE as f32,
+                update_y as f32 * MARIO_SPRITE_BLOCK_SIZE as f32,
+                WHITE,
+                DrawTextureParams {
+                    source: Some(Rect {
+                        x: 0.0,
+                        y: sprite_y,
+                        w: MARIO_SPRITE_BLOCK_SIZE as f32,
+                        h: MARIO_SPRITE_BLOCK_SIZE as f32,
+                    }),
+                    ..Default::default()
+                },
+            );
+    
+            set_default_camera();
+    
+            // Update the level texture
+            self.level_texture = Some(render_target.texture.clone());
+        }
+    }
     fn draw(&self) {
         match self.game_state {
             GameState::GameOver => {

@@ -15,17 +15,11 @@ pub mod mario_config;
 
 pub mod preparation;
 use lazy_static::lazy_static;
-
-const DIRECTIONS: [(isize, isize); 8] = [
-    (-1, 0),
-    (0, -1),
-    (0, 1),
-    (1, 0),
-    (1, 1),
-    (-1, -1),
-    (1, -1),
-    (-1, 1),
-];
+struct WorldBounds {
+    min_x: usize,
+    max_x: usize,
+    max_y: usize,
+}
 #[derive(Debug)]
 enum CollisionType {
     PlayerWithBlock,
@@ -42,7 +36,7 @@ struct CollisionResponse {
     collided: bool,
     collision_type: Option<CollisionType>,
 }
-fn resolve_collision_general(
+fn get_collision_response(
     object: &Object,
     velocity: &Vec2,
     other: &SurroundingObject,
@@ -68,48 +62,27 @@ fn resolve_collision_general(
 
     if x_overlap > 0.0 && y_overlap > 0.0 {
         match relative_direction_to_object {
-            (0, -1) => { // object is to the left
-               
-                    new_pos.x += x_overlap;
+            (0, -1) | (0, 1) => {
+                new_pos.x -= x_overlap * relative_direction_to_object.1 as f32;
+                if velocity.x.signum() == relative_direction_to_object.1 as f32 {
                     new_velocity.x = 0.0;
-             
+                }
             },
-            (0, 1) => { // object is to the right
-
-                    new_pos.x -= x_overlap;
-                    new_velocity.x = 0.0;
-
-            },
-            (-1, 0) => { // object is above
-
-                    new_pos.y += y_overlap;
-                    new_velocity.y = 0.0;
-
-            },
-            (1, 0) => { // object is below
-
-                    new_pos.y -= y_overlap;
-                    new_velocity.y = 0.0;
-
+            (-1, 0) | (1, 0) => {
+                new_pos.y -= y_overlap * relative_direction_to_object.0 as f32;
+                new_velocity.y = 0.0;
             },
             _ => {
-                if x_overlap < y_overlap {
-                    if self_center.x < other_center.x {
-                        new_pos.x -= x_overlap;
-                        new_velocity.x = 0.0;
-                    } else {
-                        new_pos.x += x_overlap;
+                if x_overlap < y_overlap  {
+                    new_pos.x -= x_overlap * relative_direction_to_object.1 as f32;
+                    if velocity.x.signum() == relative_direction_to_object.1 as f32 {
                         new_velocity.x = 0.0;
                     }
                 } else {
-                    if self_center.y < other_center.y {
-                        new_pos.y -= y_overlap;
-                        new_velocity.y = 0.0;
-                    } else {
-                        new_pos.y += y_overlap;
-                        new_velocity.y = 0.0;
-                    }
+                    new_pos.y -= y_overlap * relative_direction_to_object.0 as f32;
+                    new_velocity.y = 0.0;
                 }
+
             }
         }
     }
@@ -149,7 +122,7 @@ impl CollisionHandler for PowerupCollisionHandler {
         velocity: &Vec2,
         other: &SurroundingObject,
     ) -> CollisionResponse {
-        let collision_response = resolve_collision_general(object, velocity, other);
+        let collision_response = get_collision_response(object, velocity, other);
 
         if collision_response.collided {
             return CollisionResponse {
@@ -170,7 +143,7 @@ impl CollisionHandler for BlockCollisionHandler {
         velocity: &Vec2,
         other: &SurroundingObject,
     ) -> CollisionResponse {
-        let collision_response = resolve_collision_general(object, velocity, other);
+        let collision_response = get_collision_response(object, velocity, other);
         match other.object.object_type {
             ObjectType::Block(BlockType::Block) => {
                 if collision_response.collided {
@@ -189,7 +162,7 @@ impl CollisionHandler for BlockCollisionHandler {
                         new_velocity: collision_response.new_velocity,
                         collided: collision_response.collided,
                         collision_type: {
-                            if velocity.y < 0.0 {
+                            if velocity.y < 0.0 && object.object_type == ObjectType::Player && object.pos.y > other.object.pos.y { 
                                 Some(CollisionType::PlayerWithPowerupBlock)
                             } else {
                                 Some(CollisionType::PlayerWithBlock)
@@ -211,7 +184,7 @@ impl CollisionHandler for EnemyCollisionHandler {
         velocity: &Vec2,
         other: &SurroundingObject,
     ) -> CollisionResponse {
-        let collision_response = resolve_collision_general(object, velocity, other);
+        let collision_response = get_collision_response(object, velocity, other);
         let new_velo = Vec2::new(-velocity.x, velocity.y);
         let new_pos = Vec2::new(object.pos.x, object.pos.y);
 
@@ -234,7 +207,7 @@ impl CollisionHandler for EnemyBlockCollisionHandler {
         velocity: &Vec2,
         other: &SurroundingObject,
     ) -> CollisionResponse {
-        let collision_response = resolve_collision_general(object, velocity, other);
+        let collision_response = get_collision_response(object, velocity, other);
         if other.object.pos.y / 16.0 == object.pos.y / 16.0 {
             // if goomba is on the same level as block, reverse direction
             let new_pos = Vec2::new(collision_response.new_pos.x, collision_response.new_pos.y); // move goomba back a bit, otherwise it will get stuck
@@ -256,10 +229,10 @@ impl CollisionHandler for PlayerEnemyCollisionHandler {
         velocity: &Vec2,
         other: &SurroundingObject,
     ) -> CollisionResponse {
-        let collision_response = resolve_collision_general(object, velocity, other);
+        let collision_response = get_collision_response(object, velocity, other);
         if collision_response.collided {
             if (object.pos.y + object.height as f32) < (other.object.pos.y + other.object.height as f32) {
-                // because mario can be larger than goomba
+
                 return CollisionResponse {
                     new_pos: collision_response.new_pos,
                     new_velocity: Vec2::new(velocity.x, -3.0), // bounce up
@@ -302,18 +275,19 @@ trait Updatable {
     }
     fn update_animation(&mut self) {}
     fn get_collision_handler(&self, object_type: ObjectType) -> Box<dyn CollisionHandler>; // this could be a trait enum?
-    fn handle_world_border(&mut self, world_bounds: (usize, usize)) -> Option<GameEvent>;
+    fn handle_world_border(&mut self, world_bounds: WorldBounds) -> Option<GameEvent>;
     fn update(
         &mut self,
         surrounding_objects: &Vec<SurroundingObject>,
-        world_bounds: (usize, usize),
+        world_bounds: WorldBounds,
     ) -> Vec<GameEvent> {
         let self_center_x: f32 = self.object().pos.x + self.object().width as f32 / 2.0;
         let block_below = surrounding_objects
             .iter()
             .find(|obj| {
                 let obj = &obj.object;
-                obj.pos.y > self.object().pos.y
+                obj.pos.y >= self.object().pos.y + self.object().height as f32 
+                    && obj.pos.y < self.object().pos.y + self.object().height as f32 + 1.0 // makes it smoother
                     && obj.pos.x < self_center_x
                     && obj.pos.x + obj.width as f32 > self_center_x
             });
@@ -607,19 +581,19 @@ impl Updatable for Player {
             _ => panic!("No collision handler for object type: {:?}", object_type),
         }
     }
-    fn handle_world_border(&mut self, world_bounds: (usize, usize)) -> Option<GameEvent> {
-        if self.object.pos.x < 0.0 {
-            self.object.pos.x = 0.0;
+    fn handle_world_border(&mut self, world_bounds: WorldBounds) -> Option<GameEvent> {
+        if self.object.pos.x < world_bounds.min_x as f32 {
+            self.object.pos.x = world_bounds.min_x as f32;
             self.velocity.x = 0.0;
         }
-        if self.object.pos.x + self.object.width as f32 > world_bounds.0 as f32 {
+        if self.object.pos.x + self.object.width as f32 > world_bounds.max_x as f32 {
             return Some(GameEvent {
                 event: GameEventType::GameWon,
                 triggered_by: self.object.clone(),
                 target: None,
             });
         }
-        if self.object.pos.y > world_bounds.1 as f32 {
+        if self.object.pos.y > world_bounds.max_y as f32 {
             return Some(GameEvent {
                 event: GameEventType::GameOver,
                 triggered_by: self.object.clone(),
@@ -690,7 +664,7 @@ impl Player {
         match self.power_state {
             PlayerState::Small => {
                 self.power_state = PlayerState::Big;
-                self.object.height = (MARIO_SPRITE_BLOCK_SIZE as f32 * 1.5) as usize;
+                self.object.height = (MARIO_SPRITE_BLOCK_SIZE as f32 * 2.0) as usize;
             }
             _ => {}
         }
@@ -710,8 +684,9 @@ impl Player {
     fn update(
         &mut self,
         surrounding_objects: &Vec<SurroundingObject>,
-        world_bounds: (usize, usize),
+        world_bounds: WorldBounds,
     ) -> Vec<GameEvent> {
+
         return Updatable::update(self, surrounding_objects, world_bounds);
     }
 
@@ -795,16 +770,16 @@ impl Updatable for Goomba {
     fn animate(&mut self) -> &mut Animate {
         &mut self.animate
     }
-    fn handle_world_border(&mut self, world_bounds: (usize, usize)) -> Option<GameEvent> {
+    fn handle_world_border(&mut self, world_bounds: WorldBounds) -> Option<GameEvent> {
         if self.object.pos.x < 0.0 {
             self.object.pos.x = 0.0;
             self.velocity.x = 0.0;
         }
-        if self.object.pos.x + self.object.width as f32 > world_bounds.0 as f32 {
-            self.object.pos.x = world_bounds.0 as f32 - self.object.width as f32;
+        if self.object.pos.x + self.object.width as f32 > world_bounds.max_x as f32 {
+            self.object.pos.x = world_bounds.max_x as f32 - self.object.width as f32;
             self.velocity.x = 0.0;
         }
-        if self.object.pos.y > world_bounds.1 as f32 {
+        if self.object.pos.y > world_bounds.max_y as f32 {
             return Some(GameEvent {
                 event: GameEventType::Kill,
                 triggered_by: self.object.clone(),
@@ -850,7 +825,7 @@ impl Goomba {
     fn update(
         &mut self,
         surrounding_objects: &Vec<SurroundingObject>,
-        world_bounds: (usize, usize),
+        world_bounds: WorldBounds,
     ) -> Vec<GameEvent> {
         self.velocity.x = 1.0 * self.velocity.x.signum(); // avoid friction atm;
         return Updatable::update(self, surrounding_objects, world_bounds);
@@ -893,8 +868,11 @@ impl Camera {
     }
 
     fn update(&mut self, player_x: usize, player_y: usize) {
-        self.x = player_x.saturating_sub(self.width / 4);
-        self.x = self.x.clamp(0, MARIO_WORLD_SIZE.width - self.width);
+        let new_x = player_x.saturating_sub(self.width / 4);
+        if new_x >= self.x {
+            self.x = new_x;
+            self.x = self.x.clamp(0, MARIO_WORLD_SIZE.width - self.width);
+        }    
         self.y = player_y.saturating_sub(self.height);
     }
 }
@@ -968,16 +946,16 @@ impl Updatable for PowerUp {
         }
     }
 
-    fn handle_world_border(&mut self, world_bounds: (usize, usize)) -> Option<GameEvent> {
+    fn handle_world_border(&mut self, world_bounds: WorldBounds) -> Option<GameEvent> {
         if self.object.pos.x < 0.0 {
             self.object.pos.x = 0.0;
             self.velocity.x = 0.0;
         }
-        if self.object.pos.x + self.object.width as f32 > world_bounds.0 as f32 {
-            self.object.pos.x = world_bounds.0 as f32 - self.object.width as f32;
+        if self.object.pos.x + self.object.width as f32 > world_bounds.max_x as f32 {
+            self.object.pos.x = world_bounds.max_x as f32 - self.object.width as f32;
             self.velocity.x = 0.0;
         }
-        if self.object.pos.y > world_bounds.1 as f32 {
+        if self.object.pos.y > world_bounds.max_y as f32 {
             return Some(GameEvent {
                 event: GameEventType::Kill,
                 triggered_by: self.object.clone(),
@@ -1006,7 +984,7 @@ impl PowerUp {
     fn update(
         &mut self,
         surrounding_objects: &Vec<SurroundingObject>,
-        world_bounds: (usize, usize),
+        world_bounds: WorldBounds,
     ) -> Vec<GameEvent> {
         self.velocity.x = 1.0 * self.velocity.x.signum(); // avoid friction atm;
         return Updatable::update(self, surrounding_objects, world_bounds);
@@ -1116,7 +1094,7 @@ impl World {
         self.level_texture = Some(render_texture); // to draw in one call, while keeping compressed json instead of loading a .png
     }
 
-    async fn load_sounds(&mut self) -> (Sound, Sound, Sound) {
+    async fn load_sounds(&mut self){
         let jump_sound = load_sound("sounds/mario_jump.wav")
             .await
             .expect("Failed to load jump sound");
@@ -1131,7 +1109,13 @@ impl World {
             overworld_sound.clone(),
             powerup_sound.clone(),
         ));
-        (jump_sound, overworld_sound, powerup_sound)
+        play_sound(
+            &overworld_sound,
+            PlaySoundParams {
+                looped: true,
+                volume: SOUND_VOLUME,
+            },
+        );
     }
     async fn load_player(&mut self) {
         self.player = Player::new(48, 176, MAX_VELOCITY_X);
@@ -1219,8 +1203,15 @@ impl World {
         enemies: &Vec<Goomba>,
         powerups: &Vec<PowerUp>,
         object: &Object,
+        radius: usize,
     ) -> Vec<SurroundingObject> {
-        DIRECTIONS
+
+        let directions: Vec<(isize, isize)> = (-(radius as isize)..=radius as isize)
+        .flat_map(|dy| (-(radius as isize)..=radius as isize).map(move |dx| (dy, dx)))
+        .filter(|&(dy, dx)| dy != 0 || dx != 0) // Exclude the (0, 0) direction (current object position)
+        .collect();
+
+        directions
             .iter()
             .filter_map(|(dy, dx)| {
                 let new_y = (object.pos.y / 16.0).round() as isize + *dy;
@@ -1232,26 +1223,26 @@ impl World {
                     && new_x < objects[0].len() as isize
                 {
                     let reference = objects[new_y as usize][new_x as usize].clone();
-                    let relative_direction = (*dy, *dx);
+                    let relative_direction = (dy.signum(), dx.signum());
                     Some((reference, relative_direction))
                 } else {
                     None
                 }
             })
             .filter_map(|(reference, relative_direction)| match reference {
-                ObjectReference::Block(object) => Some(SurroundingObject {
-                    object: object,
+                ObjectReference::Block(object) => Some(SurroundingObject::new(
+                    object,
                     relative_direction,
-                }),
+                )),
                 ObjectReference::Enemy(index) => {
                     if enemies.len() <= index {
                         return None;
                     }
                     let enemy = &enemies[index];
-                    Some(SurroundingObject {
-                        object: enemy.object.clone(),
+                    Some( SurroundingObject::new(
+                        enemy.object.clone(),
                         relative_direction,
-                    })
+                    ))
                 }
                 ObjectReference::Player => None,
                 ObjectReference::Powerup(powerup_index) => {
@@ -1259,10 +1250,10 @@ impl World {
                         return None;
                     }
                     let powerup = &powerups[powerup_index];
-                    Some(SurroundingObject {
-                        object: powerup.object.clone(),
+                    Some(SurroundingObject::new(
+                        powerup.object.clone(),
                         relative_direction,
-                    })
+                    ))
                 }
                 ObjectReference::None => None,
             })
@@ -1388,12 +1379,13 @@ impl World {
                 &other_enemies,
                 &self.powerups,
                 &enemy.object,
+1   
             );
 
             let old_x = (enemy.object.pos.x / 16.0).round() as usize;
             let old_y = (enemy.object.pos.y / 16.0).round() as usize;
 
-            let game_event = enemy.update(&surrounding_objects, (self.width, self.height));
+            let game_event = enemy.update(&surrounding_objects, WorldBounds { min_x: 0, max_x: self.width, max_y: self.height });
             vec_of_game_events.push(game_event);
 
             let new_x = (enemy.object.pos.x / 16.0).round() as usize;
@@ -1426,12 +1418,13 @@ impl World {
                 &self.enemies,
                 &other_powerups,
                 &powerup.object,
+                1,
             );
 
             let old_x = (powerup.object.pos.x / 16.0).round() as usize;
             let old_y = (powerup.object.pos.y / 16.0).round() as usize;
 
-            let game_event = powerup.update(&surrounding_objects, (self.width, self.height));
+            let game_event = powerup.update(&surrounding_objects, WorldBounds { min_x: 0, max_x: self.width, max_y: self.height });
             vec_of_game_events.push(game_event);
 
             let new_x = (powerup.object.pos.x / 16.0).round() as usize;
@@ -1457,11 +1450,16 @@ impl World {
             &self.enemies,
             &self.powerups,
             &self.player.object,
+            match self.player.power_state {
+                PlayerState::Big => 2,
+                _ => 1,
+            },
         );
 
         let game_event = self
             .player
-            .update(&player_surrounding_objects, (self.width, self.height));
+            .update(&player_surrounding_objects, WorldBounds { min_x: self.camera.x, max_x: self.width, max_y: self.height });
+
         vec_of_game_events.push(game_event);
 
         for game_events in vec_of_game_events {
@@ -1574,14 +1572,8 @@ async fn main() {
     preparation::main();
     let mut world = World::new(MARIO_WORLD_SIZE.height, MARIO_WORLD_SIZE.width);
 
-    let (_, overworld_sound, _) = world.load_sounds().await;
-    play_sound(
-        &overworld_sound,
-        PlaySoundParams {
-            looped: true,
-            volume: SOUND_VOLUME,
-        },
-    );
+    world.load_sounds().await;
+
     world.load_level().await;
     world.spawn_enemies();
     world.load_player().await;

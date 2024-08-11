@@ -45,16 +45,19 @@ struct CollisionResponse {
 fn resolve_collision_general(
     object: &Object,
     velocity: &Vec2,
-    other: &Object,
+    other: &SurroundingObject,
 ) -> CollisionResponse {
+    let (other, relative_direction_to_object) = (&other.object, other.relative_direction);
     let self_center = Vec2::new(
         object.pos.x + object.width as f32 / 2.0,
         object.pos.y + object.height as f32 / 2.0,
     );
+
     let other_center = Vec2::new(
         other.pos.x + other.width as f32 / 2.0,
         other.pos.y + other.height as f32 / 2.0,
     );
+    
     let x_overlap =
         (object.width as f32 + other.width as f32) / 2.0 - (self_center.x - other_center.x).abs();
     let y_overlap =
@@ -64,35 +67,53 @@ fn resolve_collision_general(
     let mut new_velocity = *velocity;
 
     if x_overlap > 0.0 && y_overlap > 0.0 {
-        let y_collision_threshold = 0.2;
-        if y_overlap < object.height as f32 * y_collision_threshold {
-            if self_center.y < other_center.y {
-                new_pos.y -= y_overlap;
-                new_velocity.y = 0.0;
-            } else {
-                new_pos.y += y_overlap;
-                new_velocity.y = 0.0;
-            }
-        } else {
-            if x_overlap < y_overlap {
-                if self_center.x < other_center.x {
-                    new_pos.x -= x_overlap;
-                    new_velocity.x = 0.0;
-                } else {
+        match relative_direction_to_object {
+            (0, -1) => { // object is to the left
+               
                     new_pos.x += x_overlap;
                     new_velocity.x = 0.0;
-                }
-            } else {
-                if self_center.y < other_center.y {
-                    new_pos.y -= y_overlap;
-                    new_velocity.y = 0.0;
-                } else {
+             
+            },
+            (0, 1) => { // object is to the right
+
+                    new_pos.x -= x_overlap;
+                    new_velocity.x = 0.0;
+
+            },
+            (-1, 0) => { // object is above
+
                     new_pos.y += y_overlap;
                     new_velocity.y = 0.0;
+
+            },
+            (1, 0) => { // object is below
+
+                    new_pos.y -= y_overlap;
+                    new_velocity.y = 0.0;
+
+            },
+            _ => {
+                if x_overlap < y_overlap {
+                    if self_center.x < other_center.x {
+                        new_pos.x -= x_overlap;
+                        new_velocity.x = 0.0;
+                    } else {
+                        new_pos.x += x_overlap;
+                        new_velocity.x = 0.0;
+                    }
+                } else {
+                    if self_center.y < other_center.y {
+                        new_pos.y -= y_overlap;
+                        new_velocity.y = 0.0;
+                    } else {
+                        new_pos.y += y_overlap;
+                        new_velocity.y = 0.0;
+                    }
                 }
             }
         }
     }
+
     CollisionResponse {
         new_pos,
         new_velocity,
@@ -106,12 +127,12 @@ trait CollisionHandler {
         &self,
         object: &Object,
         velocity: &Vec2,
-        other: &Object,
+        other: &SurroundingObject,
     ) -> CollisionResponse;
 }
 struct DoNothingCollisionHandler;
 impl CollisionHandler for DoNothingCollisionHandler {
-    fn resolve_collision(&self, object: &Object, velocity: &Vec2, _: &Object) -> CollisionResponse {
+    fn resolve_collision(&self, object: &Object, velocity: &Vec2, _: &SurroundingObject) -> CollisionResponse {
         CollisionResponse {
             new_pos: object.pos,
             new_velocity: *velocity,
@@ -126,7 +147,7 @@ impl CollisionHandler for PowerupCollisionHandler {
         &self,
         object: &Object,
         velocity: &Vec2,
-        other: &Object,
+        other: &SurroundingObject,
     ) -> CollisionResponse {
         let collision_response = resolve_collision_general(object, velocity, other);
 
@@ -147,10 +168,10 @@ impl CollisionHandler for BlockCollisionHandler {
         &self,
         object: &Object,
         velocity: &Vec2,
-        other: &Object,
+        other: &SurroundingObject,
     ) -> CollisionResponse {
         let collision_response = resolve_collision_general(object, velocity, other);
-        match other.object_type {
+        match other.object.object_type {
             ObjectType::Block(BlockType::Block) => {
                 if collision_response.collided {
                     return CollisionResponse {
@@ -188,7 +209,7 @@ impl CollisionHandler for EnemyCollisionHandler {
         &self,
         object: &Object,
         velocity: &Vec2,
-        other: &Object,
+        other: &SurroundingObject,
     ) -> CollisionResponse {
         let collision_response = resolve_collision_general(object, velocity, other);
         let new_velo = Vec2::new(-velocity.x, velocity.y);
@@ -211,10 +232,10 @@ impl CollisionHandler for EnemyBlockCollisionHandler {
         &self,
         object: &Object,
         velocity: &Vec2,
-        other: &Object,
+        other: &SurroundingObject,
     ) -> CollisionResponse {
         let collision_response = resolve_collision_general(object, velocity, other);
-        if other.pos.y / 16.0 == object.pos.y / 16.0 {
+        if other.object.pos.y / 16.0 == object.pos.y / 16.0 {
             // if goomba is on the same level as block, reverse direction
             let new_pos = Vec2::new(collision_response.new_pos.x, collision_response.new_pos.y); // move goomba back a bit, otherwise it will get stuck
             return CollisionResponse {
@@ -233,11 +254,11 @@ impl CollisionHandler for PlayerEnemyCollisionHandler {
         &self,
         object: &Object,
         velocity: &Vec2,
-        other: &Object,
+        other: &SurroundingObject,
     ) -> CollisionResponse {
         let collision_response = resolve_collision_general(object, velocity, other);
         if collision_response.collided {
-            if (object.pos.y + object.height as f32) < (other.pos.y + other.height as f32) {
+            if (object.pos.y + object.height as f32) < (other.object.pos.y + other.object.height as f32) {
                 // because mario can be larger than goomba
                 return CollisionResponse {
                     new_pos: collision_response.new_pos,
@@ -290,11 +311,8 @@ trait Updatable {
         let self_center_x: f32 = self.object().pos.x + self.object().width as f32 / 2.0;
         let block_below = surrounding_objects
             .iter()
-            .filter_map(|obj| match obj {
-                SurroundingObject::Object(obj) => Some(obj),
-                _ => None,
-            })
             .find(|obj| {
+                let obj = &obj.object;
                 obj.pos.y > self.object().pos.y
                     && obj.pos.x < self_center_x
                     && obj.pos.x + obj.width as f32 > self_center_x
@@ -313,14 +331,13 @@ trait Updatable {
         self.mut_object().pos += velocity;
         let mut game_events = Vec::new();
         for other in surrounding_objects {
-            let (other_obj_type, other_obj) = self.extract_object_info(other);
-            let collision_handler = self.get_collision_handler(other_obj_type);
+            let collision_handler = self.get_collision_handler(other.object.object_type);
             let collision_response =
-                collision_handler.resolve_collision(self.object(), self.velocity(), other_obj);
+                collision_handler.resolve_collision(self.object(), self.velocity(), other);
 
             match collision_response.collision_type {
                 Some(ref collision_type) => {
-                    let game_event = self.create_game_event(collision_type, other_obj);
+                    let game_event = self.create_game_event(collision_type, &other.object);
                     if let Some(event) = game_event {
                         game_events.push(event);
                     }
@@ -340,12 +357,7 @@ trait Updatable {
 
         game_events
     }
-    fn extract_object_info<'a>(&self, other: &'a SurroundingObject) -> (ObjectType, &'a Object) {
-        match other {
-            SurroundingObject::Object(obj) => (obj.object_type, obj),
-            SurroundingObject::Goomba(goomba) => (goomba.object.object_type, &goomba.object),
-        }
-    }
+
     fn create_game_event(
         &self,
         collision_type: &CollisionType,
@@ -382,7 +394,7 @@ trait Updatable {
                 triggered_by: self.object().clone(),
                 target: Some(other.clone()),
             }),
-            _ => None,
+
         }
     }
     fn update_position_and_velocity(&mut self, collision_response: &CollisionResponse) {
@@ -462,7 +474,20 @@ enum ObjectType {
     Powerup,
     Player,
 }
-
+struct SurroundingObject {
+    object: Object,
+    relative_direction: (isize, isize),
+}
+impl SurroundingObject {
+    fn new(object: Object, relative_direction: (isize, isize)) -> SurroundingObject {
+        assert!(relative_direction.0.abs() <= 1 && relative_direction.1.abs() <= 1);
+        assert!(relative_direction != (0, 0));
+        SurroundingObject {
+            object,
+            relative_direction,
+        }
+    }
+}
 #[derive(Clone, Debug)]
 struct Object {
     pos: Vec2,
@@ -904,11 +929,8 @@ enum ObjectReference {
     Powerup(usize),
     None,
 }
-enum SurroundingObject {
-    // relevant to be able to handle other object's velocity if needed in collision
-    Object(Object),
-    Goomba(Goomba),
-}
+
+
 #[derive(Clone)]
 struct PowerUp {
     object: Object,
@@ -1198,41 +1220,49 @@ impl World {
         powerups: &Vec<PowerUp>,
         object: &Object,
     ) -> Vec<SurroundingObject> {
-        let surrounding_objects_refs = DIRECTIONS
+        DIRECTIONS
             .iter()
             .filter_map(|(dy, dx)| {
                 let new_y = (object.pos.y / 16.0).round() as isize + *dy;
                 let new_x = (object.pos.x / 16.0).round() as isize + *dx;
-
+    
                 if new_y >= 0
                     && new_y < objects.len() as isize
                     && new_x >= 0
                     && new_x < objects[0].len() as isize
                 {
-                    Some(objects[new_y as usize][new_x as usize].clone())
+                    let reference = objects[new_y as usize][new_x as usize].clone();
+                    let relative_direction = (*dy, *dx);
+                    Some((reference, relative_direction))
                 } else {
                     None
                 }
             })
-            .collect::<Vec<ObjectReference>>();
-        surrounding_objects_refs
-            .iter()
-            .filter_map(|reference| match reference {
-                ObjectReference::Block(object) => Some(SurroundingObject::Object(object.clone())),
+            .filter_map(|(reference, relative_direction)| match reference {
+                ObjectReference::Block(object) => Some(SurroundingObject {
+                    object: object,
+                    relative_direction,
+                }),
                 ObjectReference::Enemy(index) => {
-                    if enemies.len() <= *index {
+                    if enemies.len() <= index {
                         return None;
                     }
-                    let enemy = &enemies[*index];
-                    Some(SurroundingObject::Goomba(enemy.clone()))
+                    let enemy = &enemies[index];
+                    Some(SurroundingObject {
+                        object: enemy.object.clone(),
+                        relative_direction,
+                    })
                 }
                 ObjectReference::Player => None,
-                ObjectReference::Powerup(powerup) => {
-                    if powerups.len() <= *powerup {
+                ObjectReference::Powerup(powerup_index) => {
+                    if powerups.len() <= powerup_index {
                         return None;
                     }
-                    let powerup = &powerups[*powerup];
-                    Some(SurroundingObject::Object(powerup.object.clone()))
+                    let powerup = &powerups[powerup_index];
+                    Some(SurroundingObject {
+                        object: powerup.object.clone(),
+                        relative_direction,
+                    })
                 }
                 ObjectReference::None => None,
             })

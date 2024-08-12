@@ -18,6 +18,60 @@ pub mod mario_config;
 pub mod animation;  
 pub mod preparation;
 use lazy_static::lazy_static;
+
+lazy_static! {
+    static ref SPRITE_TYPE_MAPPING: HashMap<&'static usize, ObjectType> = {
+        let mut m = HashMap::new();
+        m.insert(&9, ObjectType::Block(BlockType::PowerupBlock));
+        m.insert(&10, ObjectType::Block(BlockType::Block));
+        m.insert(&11, ObjectType::Block(BlockType::Block));
+        m.insert(&12, ObjectType::Block(BlockType::Block));
+        m.insert(&13, ObjectType::Block(BlockType::Block));
+        m.insert(&14, ObjectType::Block(BlockType::Block));
+        m.insert(&15, ObjectType::Block(BlockType::Block));
+        m.insert(&16, ObjectType::Block(BlockType::Block));
+        m.insert(&17, ObjectType::Block(BlockType::Block));
+        m.insert(&19, ObjectType::Block(BlockType::Block));
+        m.insert(&20, ObjectType::Block(BlockType::Block));
+        m.insert(&21, ObjectType::Block(BlockType::Block));
+        m.insert(&25, ObjectType::Block(BlockType::Block));
+        m.insert(&31, ObjectType::Block(BlockType::Block));
+        m
+    };
+    static ref MARIO_SPRITE_LOOKUP: [Texture2D; 6] = [
+        load_and_convert_texture(include_bytes!("../sprites/Mario.png"), ImageFormat::Png),
+        load_and_convert_texture(
+            include_bytes!("../sprites/Mario_Run1.png"),
+            ImageFormat::Png
+        ),
+        load_and_convert_texture(
+            include_bytes!("../sprites/Mario_Run2.png"),
+            ImageFormat::Png
+        ),
+        load_and_convert_texture(
+            include_bytes!("../sprites/Mario_Jump1.png"),
+            ImageFormat::Png
+        ),
+        load_and_convert_texture(
+            include_bytes!("../sprites/Mario_Turn.png"),
+            ImageFormat::Png
+        ),
+        load_and_convert_texture(
+            include_bytes!("../sprites/Mario_Jump_HMomentum.png"),
+            ImageFormat::Png
+        ),
+    ];
+    static ref GOOMBA_SPRITE_LOOKUP: [Texture2D; 3] = [
+        load_and_convert_texture(include_bytes!("../sprites/Goomba1.png"), ImageFormat::Png),
+        load_and_convert_texture(include_bytes!("../sprites/Goomba2.png"), ImageFormat::Png),
+        load_and_convert_texture(include_bytes!("../sprites/Goomba3.png"), ImageFormat::Png),
+    ];
+    static ref POWERUP_SPRITE_LOOKUP: [Texture2D; 1] = [load_and_convert_texture(
+        include_bytes!("../sprites/Mushroom.png"),
+        ImageFormat::Png
+    ),];
+
+}
 enum DrawPortion {
     Top(f32),
     Bottom(f32),
@@ -117,18 +171,16 @@ struct SpawningObject {
 
 impl SpawningObject {
     fn new(object: impl Updatable) -> Self {
-        SpawningObject {
-            spawn_animation: match object.object().object_type {
-                ObjectType::Powerup => SpawnAnimation::PowerUp,
-                _ => panic!("No spawn animation for object type: {:?}", object.object().object_type),
-            },
-            animation_finish: match object.object().object_type {
-                ObjectType::Powerup => 16.0,
-                _ => panic!("No spawn animation for object type: {:?}", object.object().object_type),
-            },
-            object: Box::new(object),
-            animation_progress: 0.0,
-
+        match object.object().object_type {
+            ObjectType::Powerup => {
+                SpawningObject {
+                    object: Box::new(object),
+                    animation_progress: 0.0,
+                    animation_finish: 1.0,
+                    spawn_animation: SpawnAnimation::PowerUp,
+                }
+            }
+            _ => panic!("Spawning object with animation not implemented for object type: {:?}", object.object().object_type),
         }
     }
 
@@ -227,6 +279,7 @@ impl CollisionHandler for BlockCollisionHandler {
             }
             ObjectType::Block(BlockType::PowerupBlock) => {
                 if collision_response.collided {
+
                     return CollisionResponse {
                         new_pos: collision_response.new_pos,
                         new_velocity: collision_response.new_velocity,
@@ -452,58 +505,6 @@ trait Updatable: 'static{
     }
 }
 
-lazy_static! {
-    static ref SPRITE_TYPE_MAPPING: HashMap<&'static usize, ObjectType> = {
-        let mut m = HashMap::new();
-        m.insert(&9, ObjectType::Block(BlockType::PowerupBlock));
-        m.insert(&10, ObjectType::Block(BlockType::Block));
-        m.insert(&11, ObjectType::Block(BlockType::Block));
-        m.insert(&12, ObjectType::Block(BlockType::Block));
-        m.insert(&13, ObjectType::Block(BlockType::Block));
-        m.insert(&14, ObjectType::Block(BlockType::Block));
-        m.insert(&15, ObjectType::Block(BlockType::Block));
-        m.insert(&16, ObjectType::Block(BlockType::Block));
-        m.insert(&17, ObjectType::Block(BlockType::Block));
-        m.insert(&19, ObjectType::Block(BlockType::Block));
-        m.insert(&20, ObjectType::Block(BlockType::Block));
-        m.insert(&21, ObjectType::Block(BlockType::Block));
-        m.insert(&25, ObjectType::Block(BlockType::Block));
-        m.insert(&31, ObjectType::Block(BlockType::Block));
-        m
-    };
-    static ref MARIO_SPRITE_LOOKUP: [Texture2D; 6] = [
-        load_and_convert_texture(include_bytes!("../sprites/Mario.png"), ImageFormat::Png),
-        load_and_convert_texture(
-            include_bytes!("../sprites/Mario_Run1.png"),
-            ImageFormat::Png
-        ),
-        load_and_convert_texture(
-            include_bytes!("../sprites/Mario_Run2.png"),
-            ImageFormat::Png
-        ),
-        load_and_convert_texture(
-            include_bytes!("../sprites/Mario_Jump1.png"),
-            ImageFormat::Png
-        ),
-        load_and_convert_texture(
-            include_bytes!("../sprites/Mario_Turn.png"),
-            ImageFormat::Png
-        ),
-        load_and_convert_texture(
-            include_bytes!("../sprites/Mario_Jump_HMomentum.png"),
-            ImageFormat::Png
-        ),
-    ];
-    static ref GOOMBA_SPRITE_LOOKUP: [Texture2D; 3] = [
-        load_and_convert_texture(include_bytes!("../sprites/Goomba1.png"), ImageFormat::Png),
-        load_and_convert_texture(include_bytes!("../sprites/Goomba2.png"), ImageFormat::Png),
-        load_and_convert_texture(include_bytes!("../sprites/Goomba3.png"), ImageFormat::Png),
-    ];
-    static ref POWERUP_SPRITE_LOOKUP: [Texture2D; 1] = [load_and_convert_texture(
-        include_bytes!("../sprites/Mushroom.png"),
-        ImageFormat::Png
-    ),];
-}
 
 #[derive(Clone, PartialEq, Copy, Debug)]
 enum BlockType {
@@ -1069,7 +1070,7 @@ enum GameState {
 }
 #[derive(Clone)]
 enum ObjectReference {
-    Block(Object),
+    Block(usize),
     Enemy(usize), // Index into the self.enemies vector
     Player,
     Powerup(usize),
@@ -1172,7 +1173,44 @@ impl PowerUp {
         )
     }
 }
-
+struct Block {
+    object: Object,
+    animate: Animate,
+}
+impl Block {
+    fn new_block(x: usize, y: usize) -> Block {
+        let mut block = Block {
+            object: Object::new(x, y, ObjectType::Block(BlockType::Block)),
+            animate: Animate::new(1.0),
+        };
+        block
+            .animate
+            .change_animation_sprites(vec![MARIO_SPRITE_LOOKUP[0].clone()]);
+        block
+    }
+    fn new_powerup_block(x: usize, y: usize) -> Block {
+        let mut block = Block {
+            object: Object::new(x, y, ObjectType::Block(BlockType::PowerupBlock)),
+            animate: Animate::new(1.0),
+        };
+        block
+            .animate
+            .change_animation_sprites(vec![MARIO_SPRITE_LOOKUP[0].clone()]);
+        block
+    }
+    fn update(&mut self) {
+        self.animate.update();
+    }
+    fn draw(&self, camera_x: usize, camera_y: usize) {
+        self.animate.draw(
+            &self.object,
+            &Vec2::new(0.0, 0.0),
+            camera_x,
+            camera_y,
+            None,
+        )
+    }
+}
 struct World {
     height: usize,
     width: usize,
@@ -1180,6 +1218,7 @@ struct World {
     player: Player,
     enemies: Vec<Goomba>,
     powerups: Vec<PowerUp>,
+    blocks: Vec<Block>,
     spawning_objects: Vec<SpawningObject>,
     camera: Camera,
     game_state: GameState,
@@ -1201,6 +1240,7 @@ impl World {
             player: Player::new(48, 176, MAX_VELOCITY_X),
             enemies: Vec::new(),
             powerups: Vec::new(),
+            blocks : Vec::new(),
             spawning_objects: Vec::new(),
             camera: Camera::new(600, height),
             game_state: GameState::Playing,
@@ -1334,11 +1374,17 @@ impl World {
                 self.powerups
                     .push(PowerUp::new(pos.x as usize, pos.y as usize));
             }
+            ObjectType::Block(BlockType::Block) => {
+                self.blocks.push(Block::new_block(pos.x as usize, pos.y as usize));
+            }
+            ObjectType::Block(BlockType::PowerupBlock) => {
+                self.blocks.push(Block::new_powerup_block(pos.x as usize, pos.y as usize));
+            }
             _ => {}
         }
         if let ObjectReference::None = self.objects[y][x] {
             self.objects[y][x] = match object.object_type {
-                ObjectType::Block(_) => ObjectReference::Block(object),
+                ObjectType::Block(_) => ObjectReference::Block(self.blocks.len() - 1),
                 ObjectType::Enemy(_) => ObjectReference::Enemy(self.enemies.len() - 1),
                 ObjectType::Player => ObjectReference::Player,
                 ObjectType::Powerup => ObjectReference::Powerup(self.powerups.len()),
@@ -1347,7 +1393,7 @@ impl World {
             panic!("Tried to add object where: Object already exists");
         }
     }
-    fn update_object(&mut self, object: Object) {
+    fn update_object_references(&mut self, object: Object) {
         let x = (object.pos.x / 16.0) as usize;
         let y = (object.pos.y / 16.0) as usize;
         if y > self.objects.len() - 1 || x > self.objects[y].len() - 1 {
@@ -1359,13 +1405,25 @@ impl World {
                 self.enemies
                     .push(Goomba::new(pos.x as usize, pos.y as usize, 1));
             }
-            _ => {}
+            ObjectType::Powerup => {
+                self.powerups
+                    .push(PowerUp::new(pos.x as usize, pos.y as usize));
+            }
+            ObjectType::Block(BlockType::Block) => {
+                self.blocks.push(Block::new_block(pos.x as usize, pos.y as usize));
+            }
+            ObjectType::Block(BlockType::PowerupBlock) => {
+                self.blocks.push(Block::new_powerup_block(pos.x as usize, pos.y as usize));
+            }
+            ObjectType::Player => {
+                self.player = Player::new(pos.x as usize, pos.y as usize, MAX_VELOCITY_X);
+            }
         }
         self.objects[y][x] = match object.object_type {
-            ObjectType::Block(_) => ObjectReference::Block(object),
+                ObjectType::Block(_) => ObjectReference::Block(self.blocks.len() - 1),
             ObjectType::Enemy(_) => ObjectReference::Enemy(self.enemies.len() - 1),
             ObjectType::Player => ObjectReference::Player,
-            ObjectType::Powerup => ObjectReference::Block(object),
+            ObjectType::Powerup => ObjectReference::Block(self.blocks.len() - 1),
         };
     }
     fn handle_input(&mut self) {
@@ -1391,6 +1449,7 @@ impl World {
         objects: &Vec<Vec<ObjectReference>>,
         enemies: &Vec<Goomba>,
         powerups: &Vec<PowerUp>,
+        blocks: &Vec<Block>,
         object: &Object,
         radius: usize,
     ) -> Vec<SurroundingObject> {
@@ -1419,10 +1478,15 @@ impl World {
                 }
             })
             .filter_map(|(reference, relative_direction)| match reference {
-                ObjectReference::Block(object) => Some(SurroundingObject::new(
-                    object,
+                ObjectReference::Block(index) => {
+                    if blocks.len() <= index {
+                        return None;
+                    } 
+                    Some(SurroundingObject::new(
+                        blocks[index].object.clone(),
+                    
                     relative_direction,
-                )),
+                ))},
                 ObjectReference::Enemy(index) => {
                     if enemies.len() <= index {
                         return None;
@@ -1537,7 +1601,7 @@ impl World {
                         let obj_idx_x: usize = (target.pos.x / 16.0).round() as usize;
                         let obj_idx_y = (target.pos.y / 16.0).round() as usize;
                         self.objects[obj_idx_y][obj_idx_x] = ObjectReference::None;
-                        self.update_object(Object::new(
+                        self.update_object_references(Object::new(
                             target.pos.x as usize,
                             target.pos.y as usize,
                             ObjectType::Block(BlockType::Block),
@@ -1592,7 +1656,9 @@ impl World {
             let surrounding_objects = Self::get_surrounding_objects(
                 &self.objects,
                 &other_enemies,
+
                 &self.powerups,
+                &self.blocks,
                 &enemy.object,
         1
             );
@@ -1618,6 +1684,10 @@ impl World {
             }
             self.objects[new_y][new_x] = ObjectReference::Enemy(i);
         }
+        for i in 0..self.blocks.len() {
+            let block = &mut self.blocks[i];
+            block.update();
+        }
         for i in 0..self.powerups.len() {
             let (before, after) = self.powerups.split_at_mut(i);
             let (powerup, after) = &mut after.split_at_mut(1);
@@ -1631,7 +1701,8 @@ impl World {
             let surrounding_objects = Self::get_surrounding_objects(
                 &self.objects,
                 &self.enemies,
-                &other_powerups,
+
+                &other_powerups,                &self.blocks,
                 &powerup.object,
                 1,
             );
@@ -1663,7 +1734,7 @@ impl World {
         let player_surrounding_objects: Vec<SurroundingObject> = Self::get_surrounding_objects(
             &self.objects,
             &self.enemies,
-            &self.powerups,
+                      &self.powerups,&self.blocks,  
             &self.player.object,
             match self.player.power_state {
                 PlayerState::Big => 2,
@@ -1788,6 +1859,9 @@ impl World {
                 }
                 for spawning_obj in &self.spawning_objects {
                     spawning_obj.draw(self.camera.x, self.camera.y);
+                }
+                for block in &self.blocks {
+                    block.draw(self.camera.x, self.camera.y);
                 }
                 for enemy in &self.enemies {
                     enemy.draw(self.camera.x, self.camera.y);

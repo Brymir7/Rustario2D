@@ -1,3 +1,4 @@
+use animation::animation::{PlayAnimation, PlayAnimationBuilder};
 use image_utils::load_and_convert_texture;
 use macroquad::audio::{load_sound, play_sound, PlaySoundParams, Sound};
 use macroquad::prelude::*;
@@ -10,11 +11,20 @@ use preparation::LevelData;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::Read;
+use std::any::Any;
+
 pub mod image_utils;
 pub mod mario_config;
-
+pub mod animation;  
 pub mod preparation;
 use lazy_static::lazy_static;
+enum DrawPortion {
+    Top(f32),
+    Bottom(f32),
+    Left(f32),
+    Right(f32),
+}
+
 struct WorldBounds {
     min_x: usize,
     max_x: usize,
@@ -94,6 +104,66 @@ fn get_collision_response(
         collision_type: None,
     }
 }
+enum SpawnAnimation {
+    PowerUp,
+}
+struct SpawningObject {
+    object: Box<dyn Updatable>,
+    animation_progress: f32,
+    animation_finish: f32,
+    spawn_animation: SpawnAnimation, // only for spawning, animate is used for alive objects
+}
+
+
+impl SpawningObject {
+    fn new(object: impl Updatable) -> Self {
+        SpawningObject {
+            spawn_animation: match object.object().object_type {
+                ObjectType::Powerup => SpawnAnimation::PowerUp,
+                _ => panic!("No spawn animation for object type: {:?}", object.object().object_type),
+            },
+            animation_finish: match object.object().object_type {
+                ObjectType::Powerup => 16.0,
+                _ => panic!("No spawn animation for object type: {:?}", object.object().object_type),
+            },
+            object: Box::new(object),
+            animation_progress: 0.0,
+
+        }
+    }
+
+    fn update(&mut self) -> bool { 
+        match self.spawn_animation {
+            SpawnAnimation::PowerUp => {
+                let move_by = 0.5;
+                self.animation_progress += move_by;
+                if self.animation_progress >= self.animation_finish {
+                    return true;
+                } else {
+                    self.object.mut_object().pos.y -= move_by;
+                    return false;
+                }
+            }
+        }
+    }
+    fn draw(& self, camera_x: usize, camera_y: usize) {
+        match self.spawn_animation {
+
+            SpawnAnimation::PowerUp => {
+
+                self.object.animate().draw(
+                    &self.object.object(),
+                    &self.object.velocity(),
+                    camera_x,
+                    camera_y,
+                    Some(DrawPortion::Top(self.animation_progress / self.animation_finish)),
+                );
+            }
+
+        }
+    
+    }
+}
 
 trait CollisionHandler {
     fn resolve_collision(
@@ -162,7 +232,8 @@ impl CollisionHandler for BlockCollisionHandler {
                         new_velocity: collision_response.new_velocity,
                         collided: collision_response.collided,
                         collision_type: {
-                            if velocity.y < 0.0 && object.object_type == ObjectType::Player && object.pos.y > other.object.pos.y { 
+                            if other.relative_direction == (-1, 0) && velocity.y < 0.0 && object.object_type == ObjectType::Player && object.pos.y > other.object.pos.y { 
+
                                 Some(CollisionType::PlayerWithPowerupBlock)
                             } else {
                                 Some(CollisionType::PlayerWithBlock)
@@ -251,15 +322,16 @@ impl CollisionHandler for PlayerEnemyCollisionHandler {
         return collision_response;
     }
 }
-trait Updatable {
+trait Updatable: 'static{
+    fn as_any(&self) -> &dyn Any;
     fn mut_object(&mut self) -> &mut Object;
     fn mut_velocity(&mut self) -> &mut Vec2;
     fn object(&self) -> &Object;
     fn velocity(&self) -> &Vec2;
 
     fn set_grounded(&mut self, grounded: bool);
-    fn animate(&mut self) -> &mut Animate;
-
+    fn animate(& self) -> & Animate;
+    fn mut_animate(&mut self) -> &mut Animate;
     fn apply_gravity(&mut self) {
         self.mut_velocity().y += GRAVITY as f32 * PHYSICS_FRAME_TIME;
     }
@@ -285,18 +357,17 @@ trait Updatable {
         let block_below = surrounding_objects
             .iter()
             .find(|obj| {
-                let obj = &obj.object;
-                obj.pos.y >= self.object().pos.y + self.object().height as f32 
-                    && obj.pos.y < self.object().pos.y + self.object().height as f32 + 1.0 // makes it smoother
-                    && obj.pos.x < self_center_x
-                    && obj.pos.x + obj.width as f32 > self_center_x
+                obj.relative_direction == (1, 0)
+                    && obj.object.pos.x < self_center_x
+                    && obj.object.pos.x + obj.object.width as f32 > self_center_x
             });
-
+       
         if block_below.is_none() {
             self.apply_gravity();
             self.set_grounded(false);
             self.apply_x_axis_friction(false);
         } else {
+
             self.set_grounded(true);
             self.apply_x_axis_friction(true);
         }
@@ -327,7 +398,7 @@ trait Updatable {
             game_events.push(event);
         }
         self.update_animation();
-        self.animate().update();
+        self.mut_animate().update();
 
         game_events
     }
@@ -348,9 +419,13 @@ trait Updatable {
                 triggered_by: other.clone(),
                 target: Some(self.object().clone()),
             }),
-            CollisionType::PlayerWithBlock => None,
+            CollisionType::PlayerWithBlock=> Some(GameEvent {
+                event: GameEventType::PlayerHitBlock,
+                triggered_by: self.object().clone(),
+                target: Some(other.clone()),
+            }),
             CollisionType::PlayerWithPowerupBlock => Some(GameEvent {
-                event: GameEventType::PlayerHitPowerUpBlock,
+                event: GameEventType::PlayerHitPowerupBlock,
                 triggered_by: self.object().clone(),
                 target: Some(other.clone()),
             }),
@@ -492,10 +567,13 @@ enum PlayerState {
     Small,
     Big,
 }
+
 #[derive(Clone)]
 struct Animate {
     frames: Vec<Texture2D>,
-    current_frames_sprite: usize,
+
+    animation: Option<PlayAnimation>,
+    current_frame_index: usize,
     speed_factor: f32,
     time_to_change: f32,
     time_elapsed: f32,
@@ -506,9 +584,10 @@ impl Animate {
         assert!(speed_factor > 0.0);
         Animate {
             frames: Vec::new(),
-            current_frames_sprite: 0,
+            animation: None,
+            current_frame_index: 0,
             speed_factor,
-            time_to_change: (PHYSICS_FRAME_TIME * 3.0) * speed_factor, // 10 frames per sprite
+            time_to_change: (PHYSICS_FRAME_TIME * 3.0) * speed_factor,
             time_elapsed: 0.0,
         }
     }
@@ -516,39 +595,133 @@ impl Animate {
     fn change_animation_sprites(&mut self, new_frames: Vec<Texture2D>) {
         if new_frames != self.frames {
             self.frames = new_frames;
-            self.current_frames_sprite = 0;
+            self.current_frame_index = 0;
             self.time_elapsed = 0.0;
         }
     }
 
+    fn play_animation(&mut self, animation: PlayAnimation) {
+        self.animation = Some(animation);
+        self.current_frame_index = 0;
+        self.time_elapsed = 0.0;
+    }
+
     fn update(&mut self) {
-        if self.frames.len() > 1 {
-            self.time_elapsed += PHYSICS_FRAME_TIME;
-            if self.time_elapsed >= self.time_to_change {
-                self.current_frames_sprite = (self.current_frames_sprite + 1) % self.frames.len();
-                self.time_elapsed -= self.time_to_change;
+        self.time_elapsed += PHYSICS_FRAME_TIME;
+
+        if let Some(animation) = &self.animation {
+            if self.time_elapsed >= animation.duration as f32{
+                self.time_elapsed = 0.0;
+                self.current_frame_index = 0;
+                self.animation = None;
+            } else {
+                self.current_frame_index = (self.time_elapsed / (PHYSICS_FRAME_TIME * 3.0)) as usize % animation.texture_frames.len();
             }
+        } else if self.frames.len() > 1 && self.time_elapsed >= self.time_to_change {
+            self.current_frame_index = (self.current_frame_index + 1) % self.frames.len();
+            self.time_elapsed -= self.time_to_change;
         }
     }
+
     fn scale_animation_speed(&mut self, factor: f32) {
         assert!(factor > 0.0);
         self.speed_factor = factor;
         self.time_to_change = (PHYSICS_FRAME_TIME * 3.0) * (1.0 / self.speed_factor);
     }
-    fn current_frames_sprite(&self) -> Option<&Texture2D> {
-        self.frames.get(self.current_frames_sprite)
+
+    fn current_frame(&self) -> Option<&Texture2D> {
+        if let Some(animation) = &self.animation {
+            animation.texture_frames.get(self.current_frame_index)
+        } else {
+            self.frames.get(self.current_frame_index)
+        }
+    }
+
+    fn draw(&self, object: &Object, velocity: &Vec2, camera_x: usize, camera_y: usize, draw_portion: Option<DrawPortion>) {
+        if let Some(sprite_to_draw) = self.current_frame() {
+            let mut src_rect = Rect::new(0.0, 0.0, sprite_to_draw.width(), sprite_to_draw.height());
+            let mut dest_size = Vec2::new(
+                (object.width * SCALE_IMAGE_FACTOR) as f32,
+                (object.height * SCALE_IMAGE_FACTOR) as f32
+            );
+
+            // Apply animation transformations
+            if let Some(animation) = &self.animation {
+                if let Some(height_frames) = &animation.height_frames {
+                    let index = (self.time_elapsed  / (PHYSICS_FRAME_TIME * 3.0 * self.speed_factor)) as usize % height_frames.len();
+                    let height = height_frames[index as usize];
+                    dest_size.y = height as f32 * SCALE_IMAGE_FACTOR as f32;
+                }
+                if let Some(width_frames) = &animation.width_frames {
+                    let index = (self.time_elapsed  / (PHYSICS_FRAME_TIME * 3.0 * self.speed_factor)) as usize % width_frames.len();
+                    let width = width_frames[index];
+                    dest_size.x = width as f32* SCALE_IMAGE_FACTOR as f32;
+                }
+                if let Some(pos_frames) = &animation.pos_frames {
+                    let index = (self.time_elapsed  / (PHYSICS_FRAME_TIME * 3.0 * self.speed_factor)) as usize % pos_frames.len();
+
+                    let pos_offset = pos_frames[index];
+                    src_rect.x += pos_offset.x;
+                    src_rect.y += pos_offset.y;
+                }
+            }
+
+            // Apply draw portion if specified
+            if let Some(portion) = draw_portion {
+                match portion {
+                    DrawPortion::Top(percentage) => {
+                        let clamped_percentage = percentage.clamp(0.0, 1.0);
+                        src_rect.h *= clamped_percentage;
+                        dest_size.y *= clamped_percentage;
+                    },
+                    DrawPortion::Bottom(percentage) => {
+                        let clamped_percentage = percentage.clamp(0.0, 1.0);
+                        src_rect.y += src_rect.h * (1.0 - clamped_percentage);
+                        src_rect.h *= clamped_percentage;
+                        dest_size.y *= clamped_percentage;
+                    },
+                    DrawPortion::Left(percentage) => {
+                        let clamped_percentage = percentage.clamp(0.0, 1.0);
+                        src_rect.w *= clamped_percentage;
+                        dest_size.x *= clamped_percentage;
+                    },
+                    DrawPortion::Right(percentage) => {
+                        let clamped_percentage = percentage.clamp(0.0, 1.0);
+                        src_rect.x += src_rect.w * (1.0 - clamped_percentage);
+                        src_rect.w *= clamped_percentage;
+                        dest_size.x *= clamped_percentage;
+                    },
+                }
+            }
+
+            draw_texture_ex(
+                sprite_to_draw,
+                (object.pos.x - camera_x as f32) * SCALE_IMAGE_FACTOR as f32,
+                (object.pos.y - camera_y as f32) * SCALE_IMAGE_FACTOR as f32,
+                WHITE,
+                DrawTextureParams {
+                    dest_size: Some(dest_size),
+                    source: Some(src_rect),
+                    flip_x: velocity.x < -0.1,
+                    ..Default::default()
+                },
+            );
+        }
     }
 }
 
 struct Player {
     object: Object,
-    max_speed: i32,
+    max_speed: f32,
     velocity: Vec2,
     is_grounded: bool,
     power_state: PlayerState,
     animate: Animate,
 }
 impl Updatable for Player {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
     fn mut_object(&mut self) -> &mut Object {
         &mut self.object
     }
@@ -569,10 +742,12 @@ impl Updatable for Player {
         self.is_grounded = grounded;
     }
 
-    fn animate(&mut self) -> &mut Animate {
+    fn animate(& self) -> & Animate {
+        & self.animate
+    }
+    fn mut_animate(&mut self) -> &mut Animate {
         &mut self.animate
     }
-
     fn get_collision_handler(&self, object_type: ObjectType) -> Box<dyn CollisionHandler> {
         match object_type {
             ObjectType::Block(_) => Box::new(BlockCollisionHandler),
@@ -646,7 +821,7 @@ impl Updatable for Player {
 }
 
 impl Player {
-    fn new(x: usize, y: usize, max_speed: i32) -> Player {
+    fn new(x: usize, y: usize, max_speed: f32) -> Player {
         let mut player = Player {
             object: Object::new(x, y, ObjectType::Player),
             max_speed,
@@ -664,7 +839,13 @@ impl Player {
         match self.power_state {
             PlayerState::Small => {
                 self.power_state = PlayerState::Big;
-                self.object.height = (MARIO_SPRITE_BLOCK_SIZE as f32 * 2.0) as usize;
+                let new_height = self.object.height * 2;
+                let animation = PlayAnimationBuilder::new(0.5, vec![self.animate.frames[self.animate.current_frame_index].clone()])
+                    .height_frames(vec![self.object.height, new_height])
+                    .build();
+                self.object.height = new_height;
+                self.animate.scale_animation_speed(0.2);
+                self.animate.play_animation(animation);
             }
             _ => {}
         }
@@ -719,23 +900,13 @@ impl Player {
     }
 
     fn draw(&self, camera_x: usize, camera_y: usize) {
-        // TODO! draw using Animate
-        if let Some(sprite_to_draw) = self.animate.current_frames_sprite() {
-            draw_texture_ex(
-                &sprite_to_draw,
-                (self.object.pos.x - camera_x as f32) * SCALE_IMAGE_FACTOR as f32,
-                (self.object.pos.y - camera_y as f32) * SCALE_IMAGE_FACTOR as f32,
-                WHITE,
-                DrawTextureParams {
-                    dest_size: Some(Vec2::new(
-                        (self.object.width * SCALE_IMAGE_FACTOR) as f32,
-                        (self.object.height * SCALE_IMAGE_FACTOR) as f32,
-                    )),
-                    flip_x: self.velocity.x < -0.1,
-                    ..Default::default()
-                },
-            );
-        }
+        self.animate.draw(
+            &self.object,
+            &self.velocity,
+            camera_x,
+            camera_y,
+            None,
+        )
     }
 }
 #[derive(Clone)]
@@ -747,8 +918,11 @@ struct Goomba {
     is_grounded: bool,
 }
 impl Updatable for Goomba {
+fn as_any(&self) -> &dyn Any {
+        self
+    }
     fn mut_object(&mut self) -> &mut Object {
-        &mut self.object
+        &mut self.object    
     }
 
     fn mut_velocity(&mut self) -> &mut Vec2 {
@@ -767,7 +941,10 @@ impl Updatable for Goomba {
         self.is_grounded = grounded;
     }
 
-    fn animate(&mut self) -> &mut Animate {
+    fn animate(& self) -> & Animate {
+        & self.animate
+    }
+    fn mut_animate(&mut self) -> &mut Animate {
         &mut self.animate
     }
     fn handle_world_border(&mut self, world_bounds: WorldBounds) -> Option<GameEvent> {
@@ -831,23 +1008,13 @@ impl Goomba {
         return Updatable::update(self, surrounding_objects, world_bounds);
     }
     fn draw(&self, camera_x: usize, camera_y: usize) {
-        // TODO! draw using Animate
-        if let Some(sprite_to_draw) = self.animate.current_frames_sprite() {
-            draw_texture_ex(
-                &sprite_to_draw,
-                (self.object.pos.x - camera_x as f32) * SCALE_IMAGE_FACTOR as f32,
-                (self.object.pos.y - camera_y as f32) * SCALE_IMAGE_FACTOR as f32,
-                WHITE,
-                DrawTextureParams {
-                    dest_size: Some(Vec2::new(
-                        (self.object.width * SCALE_IMAGE_FACTOR) as f32,
-                        (self.object.height * SCALE_IMAGE_FACTOR) as f32,
-                    )),
-                    flip_x: self.velocity.x < -0.1,
-                    ..Default::default()
-                },
-            );
-        }
+        self.animate.draw(
+            &self.object,
+            &self.velocity,
+            camera_x,
+            camera_y,
+            None,
+        )
     }
 }
 struct Camera {
@@ -883,7 +1050,8 @@ enum GameEventType {
     Kill,
     PlayerHit,
     PlayerPowerUp,
-    PlayerHitPowerUpBlock,
+    PlayerHitBlock,
+    PlayerHitPowerupBlock,
     EnemyCollEnemy,
 }
 #[derive(Debug, Clone)]
@@ -916,6 +1084,9 @@ struct PowerUp {
     animate: Animate,
 }
 impl Updatable for PowerUp {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
     fn mut_object(&mut self) -> &mut Object {
         &mut self.object
     }
@@ -934,10 +1105,12 @@ impl Updatable for PowerUp {
 
     fn set_grounded(&mut self, _: bool) {}
 
-    fn animate(&mut self) -> &mut Animate {
+    fn animate(& self) -> & Animate {
+        & self.animate
+    }
+    fn mut_animate(&mut self) -> &mut Animate {
         &mut self.animate
     }
-
     fn get_collision_handler(&self, other: ObjectType) -> Box<dyn CollisionHandler> {
         match other {
             ObjectType::Block(_) => Box::new(EnemyBlockCollisionHandler), // powerup behaves like enemy
@@ -990,23 +1163,16 @@ impl PowerUp {
         return Updatable::update(self, surrounding_objects, world_bounds);
     }
     fn draw(&self, camera_x: usize, camera_y: usize) {
-        if let Some(sprite_to_draw) = self.animate.current_frames_sprite() {
-            draw_texture_ex(
-                &sprite_to_draw,
-                (self.object.pos.x - camera_x as f32) * SCALE_IMAGE_FACTOR as f32,
-                (self.object.pos.y - camera_y as f32) * SCALE_IMAGE_FACTOR as f32,
-                WHITE,
-                DrawTextureParams {
-                    dest_size: Some(Vec2::new(
-                        (self.object.width * SCALE_IMAGE_FACTOR) as f32,
-                        (self.object.height * SCALE_IMAGE_FACTOR) as f32,
-                    )),
-                    ..Default::default()
-                },
-            );
-        }
+        self.animate.draw(
+            &self.object,
+            &self.velocity,
+            camera_x,
+            camera_y,
+            None,
+        )
     }
 }
+
 struct World {
     height: usize,
     width: usize,
@@ -1014,12 +1180,14 @@ struct World {
     player: Player,
     enemies: Vec<Goomba>,
     powerups: Vec<PowerUp>,
+    spawning_objects: Vec<SpawningObject>,
     camera: Camera,
     game_state: GameState,
     level_texture: Option<Texture2D>,
     level_render_target: Option<RenderTarget>, // to update level texture, if using index buffer + tilesheet + shader then this is not needed
     tilesheet: Option<Texture2D>, // to update level texture, if using index buffer + tilesheet + shader then this would not be needed as it would be in GPU
     sounds: Option<(Sound, Sound, Sound)>,
+
 }
 
 impl World {
@@ -1030,9 +1198,10 @@ impl World {
             height,
             width,
             objects,
-            player: Player::new(48, 176, 6),
+            player: Player::new(48, 176, MAX_VELOCITY_X),
             enemies: Vec::new(),
             powerups: Vec::new(),
+            spawning_objects: Vec::new(),
             camera: Camera::new(600, height),
             game_state: GameState::Playing,
             level_texture: None,
@@ -1095,6 +1264,9 @@ impl World {
                 }
             }
         }
+        draw_text("It's time to save Peach", self.width as f32- 210.0 , self.height as f32 / 2.0 - 25.0, 20.0, WHITE);
+        draw_text("Go! ->", self.width as f32- 55.0 , self.height as f32 / 2.0, 20.0, WHITE); 
+
         set_default_camera();
 
         let render_texture = render_target_camera.render_target.unwrap().texture;
@@ -1128,7 +1300,7 @@ impl World {
     async fn load_player(&mut self) {
         self.player = Player::new(48, 176, MAX_VELOCITY_X);
     }
-    fn spawn_enemies(&mut self) {
+    fn load_enemies(&mut self) {
         self.add_object(Object::new(160, 176, ObjectType::Enemy(EnemyType::Goomba)));
         self.add_object(Object::new(224, 176, ObjectType::Enemy(EnemyType::Goomba)));
         self.add_object(Object::new(640, 176, ObjectType::Enemy(EnemyType::Goomba)));
@@ -1136,7 +1308,16 @@ impl World {
         self.add_object(Object::new(876, 176, ObjectType::Enemy(EnemyType::Goomba)));
         self.add_object(Object::new(2648, 176, ObjectType::Enemy(EnemyType::Goomba)));
     }
+    fn spawn_object(&mut self, object: Object) {
+        match object.object_type {
+            ObjectType::Powerup => {
+                let powerup = PowerUp::new(object.pos.x as usize, object.pos.y as usize);
+                self.spawning_objects.push(SpawningObject::new(powerup));
+            }
 
+            _ => self.add_object(object),
+        }
+    }
     fn add_object(&mut self, object: Object) {
         let x = (object.pos.x / 16.0) as usize;
         let y = (object.pos.y / 16.0) as usize;
@@ -1349,28 +1530,54 @@ impl World {
                     }
                 }
             }
-            GameEventType::PlayerHitPowerUpBlock => {
+            GameEventType::PlayerHitPowerupBlock => {
                 if let Some(target) = game_event.target {
-                    let obj_idx_x: usize = (target.pos.x / 16.0).round() as usize;
-                    let obj_idx_y = (target.pos.y / 16.0).round() as usize;
-                    self.objects[obj_idx_y][obj_idx_x] = ObjectReference::None;
-                    self.update_object(Object::new(
-                        target.pos.x as usize,
-                        target.pos.y as usize,
-                        ObjectType::Block(BlockType::Block),
-                    ));
-                    self.update_level_texture(10, obj_idx_x, obj_idx_y);
-                    self.add_object(Object::new(
-                        target.pos.x as usize,
-                        target.pos.y as usize - 2 * 16,
-                        ObjectType::Powerup,
-                    ));
+                    match target.object_type {
+                    ObjectType::Block(BlockType::PowerupBlock) => {
+                        let obj_idx_x: usize = (target.pos.x / 16.0).round() as usize;
+                        let obj_idx_y = (target.pos.y / 16.0).round() as usize;
+                        self.objects[obj_idx_y][obj_idx_x] = ObjectReference::None;
+                        self.update_object(Object::new(
+                            target.pos.x as usize,
+                            target.pos.y as usize,
+                            ObjectType::Block(BlockType::Block),
+                        ));
+                        self.update_level_texture(10, obj_idx_x, obj_idx_y);
+                        self.spawn_object(Object::new(
+                            target.pos.x as usize,
+                            target.pos.y as usize,
+                            ObjectType::Powerup,
+                        ));
+
+                    }
+                _ => {}
                 }
+            }
+            }
+            _ => {  }
+        }
+    }
+    fn update_spawning_objects(&mut self ) {
+        let mut completed_spawns = Vec::new();
+        for (index, spawning_object) in self.spawning_objects.iter_mut().enumerate() {
+            if spawning_object.update() {
+                completed_spawns.push(index);
+            }
+        }
+    
+        for index in completed_spawns.iter().rev() {
+            let spawned_object = self.spawning_objects.swap_remove(*index);
+            match spawned_object.object.object().object_type {
+                ObjectType::Powerup => {
+                    let powerup = spawned_object.object.as_any().downcast_ref::<PowerUp>().expect("Failed to downcast powerup");
+                    self.add_object(powerup.object.clone()); 
+                }
+                _ => {}
             }
         }
     }
-
     fn update(&mut self) {
+        self.update_spawning_objects();
         let mut vec_of_game_events = Vec::new();
         for i in 0..self.enemies.len() {
             let (before, after) = self.enemies.split_at_mut(i);
@@ -1387,7 +1594,7 @@ impl World {
                 &other_enemies,
                 &self.powerups,
                 &enemy.object,
-1   
+        1
             );
 
             let old_x = (enemy.object.pos.x / 16.0).round() as usize;
@@ -1579,6 +1786,9 @@ impl World {
                         );
                     }
                 }
+                for spawning_obj in &self.spawning_objects {
+                    spawning_obj.draw(self.camera.x, self.camera.y);
+                }
                 for enemy in &self.enemies {
                     enemy.draw(self.camera.x, self.camera.y);
                 }
@@ -1610,10 +1820,10 @@ async fn main() {
     let mut world = World::new(MARIO_WORLD_SIZE.height, MARIO_WORLD_SIZE.width);
 
     world.load_sounds().await;
-
     world.load_level().await;
-    world.spawn_enemies();
+    world.load_enemies();
     world.load_player().await;
+
     let mut elapsed_time = 0.0;
     let target_time_step = 1.0 / PHYSICS_FRAME_PER_SECOND;
 

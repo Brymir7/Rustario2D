@@ -15,7 +15,7 @@ pub mod mario_config {
     };
     pub const PHYSICS_FRAME_PER_SECOND: f32 = 60.0;
     pub const PHYSICS_FRAME_TIME: f32 = 1.0 / PHYSICS_FRAME_PER_SECOND;
-    pub const MAX_VELOCITY_X: i32 = 3;
+    pub const MAX_VELOCITY_X: f32 = 2.8;
     pub const ACCELERATION: f32 = 3.0;
     pub const JUMP_STRENGTH: f32 = 12.0;
 }

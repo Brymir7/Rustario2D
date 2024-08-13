@@ -1,13 +1,12 @@
-use animation::animation::{PlayAnimation, PlayAnimationBuilder};
+use animation::animation::{FrameType, PlayAnimation, PlayAnimationBuilder};
 use image_utils::load_and_convert_texture;
 use macroquad::audio::{load_sound, play_sound, PlaySoundParams, Sound};
-use macroquad::{prelude::*, text};
+use macroquad::prelude::*;
 use mario_config::mario_config::{
-    ACCELERATION, GRAVITY, JUMP_STRENGTH, MARIO_NON_MUSIC_VOLUME, MARIO_SPRITE_BLOCK_SIZE,
-    MARIO_WORLD_SIZE, MAX_VELOCITY_X, PHYSICS_FRAME_PER_SECOND, PHYSICS_FRAME_TIME,
-    SCALE_IMAGE_FACTOR, SOUND_VOLUME,
+    ACCELERATION, GRAVITY, JUMP_STRENGTH, MARIO_NON_MUSIC_VOLUME, MARIO_SPRITE_BLOCK_SIZE, MARIO_WORLD_SIZE, MAX_VELOCITY_X, PHYSICS_FRAME_PER_SECOND, PHYSICS_FRAME_TIME, SCALE_IMAGE_FACTOR, SOUND_VOLUME
 };
 use preparation::LevelData;
+use std::borrow::BorrowMut;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::Read;
@@ -130,7 +129,7 @@ fn get_collision_response(
     object: &Object,
     velocity: &Vec2,
     other: &SurroundingObject,
-) -> CollisionResponse {
+) -> CollisionResponse { 
     let (other, relative_direction_to_object) = (&other.object, other.relative_direction);
     let self_center = Vec2::new(
         object.pos.x + object.width as f32 / 2.0,
@@ -598,7 +597,6 @@ enum PlayerState {
     Small,
     Big,
 }
-
 #[derive(Clone)]
 struct Animate {
     frames: Vec<Texture2D>,
@@ -617,7 +615,7 @@ impl Animate {
             animation: None,
             current_frame_index: 0,
             speed_factor,
-            time_to_change: (PHYSICS_FRAME_TIME * 3.0) * speed_factor,
+            time_to_change: (PHYSICS_FRAME_TIME * 5.0) / speed_factor,
             time_elapsed: 0.0,
         }
     }
@@ -631,70 +629,79 @@ impl Animate {
     }
 
     fn play_animation(&mut self, animation: PlayAnimation) {
+
         self.animation = Some(animation);
         self.current_frame_index = 0;
         self.time_elapsed = 0.0;
+
     }
 
     fn update(&mut self) {
         self.time_elapsed += PHYSICS_FRAME_TIME;
-
-        if let Some(animation) = &self.animation {
-            if self.time_elapsed >= animation.duration as f32{
-                self.time_elapsed = 0.0;
-                self.current_frame_index = 0;
-                self.animation = None;
-            } else {
-                self.current_frame_index = (self.time_elapsed / (PHYSICS_FRAME_TIME * 3.0)) as usize % animation.texture_frames.len();
-            }
-        } else if self.frames.len() > 1 && self.time_elapsed >= self.time_to_change {
-            self.current_frame_index = (self.current_frame_index + 1) % self.frames.len();
-            self.time_elapsed -= self.time_to_change;
+        if !(self.time_elapsed >= self.time_to_change)  {
+            return;
         }
+        if let Some(animation) = &mut self.animation {
+            if let Some(mut loop_for) = animation.loop_for {
+                if self.time_elapsed >= loop_for {
+                    self.reset_animation();
+                    return;
+                }
+                animation.next_frame();
+                loop_for -= self.time_elapsed;
+                animation.loop_for = Some(loop_for);
+            }
+            else if !animation.next_frame() {
+                self.reset_animation();
+            }
+        } else if self.frames.len() > 1 {
+            self.current_frame_index = (self.current_frame_index + 1) % self.frames.len();
+        }
+        self.time_elapsed -= self.time_to_change;
     }
 
     fn scale_animation_speed(&mut self, factor: f32) {
         assert!(factor > 0.0);
         self.speed_factor = factor;
-        self.time_to_change = (PHYSICS_FRAME_TIME * 3.0) * (1.0 / self.speed_factor);
+        self.time_to_change = (PHYSICS_FRAME_TIME * 5.0) / self.speed_factor;
     }
 
-    fn current_frame(&self) -> Option<&Texture2D> {
+    fn current_texture_frame(&self) -> Option<&Texture2D> {
         if let Some(animation) = &self.animation {
             animation.texture_frames.get(self.current_frame_index)
         } else {
             self.frames.get(self.current_frame_index)
         }
     }
-
+    fn reset_animation(&mut self) {
+        self.animation = None;
+        self.current_frame_index = 0;
+        self.time_elapsed = 0.0;
+    }
     fn draw(&self, pos: &Vec2, width: usize, height: usize, velocity: &Vec2, camera_x: usize, camera_y: usize, draw_portion: Option<DrawPortion>) {
-        if let Some(sprite_to_draw) = self.current_frame() {
+        if let Some(sprite_to_draw) = self.current_texture_frame() {
             let mut src_rect = Rect::new(0.0, 0.0, sprite_to_draw.width(), sprite_to_draw.height());
             let mut dest_size = Vec2::new(
                 (width * SCALE_IMAGE_FACTOR) as f32,
                 (height * SCALE_IMAGE_FACTOR) as f32
             );
-            let mut pos_offset: Vec2 = Vec2::new(0.0, 0.0);
-            // Apply animation transformations
-            if let Some(animation) = &self.animation {
-                if let Some(height_frames) = &animation.height_frames {
-                    let index = (self.time_elapsed  / (PHYSICS_FRAME_TIME * 3.0 * self.speed_factor)) as usize % height_frames.len();
-                    let height = height_frames[index as usize];
-                    dest_size.y = height as f32 * SCALE_IMAGE_FACTOR as f32;
-                }
-                if let Some(width_frames) = &animation.width_frames {
-                    let index = (self.time_elapsed  / (PHYSICS_FRAME_TIME * 3.0 * self.speed_factor)) as usize % width_frames.len();
-                    let width = width_frames[index];
-                    dest_size.x = width as f32* SCALE_IMAGE_FACTOR as f32;
-                }
-                if let Some(pos_frames) = &animation.pos_frames {
-                    let index = (self.time_elapsed  / (PHYSICS_FRAME_TIME * 3.0 * self.speed_factor)) as usize % pos_frames.len();
+            let mut pos_offset = Vec2::ZERO;
 
-                    pos_offset = pos_frames[index];
+            if let Some(animation) = &self.animation {
+                match &animation.frame_type {
+                    Some(FrameType::Height(frames)) => {
+                        dest_size.y = frames[animation.frame_index] as f32 * SCALE_IMAGE_FACTOR as f32;
+                    }
+                    Some(FrameType::Width(frames)) => {
+                        dest_size.x = frames[animation.frame_index] as f32 * SCALE_IMAGE_FACTOR as f32;
+                    }
+                    Some(FrameType::PosOffset(frames)) => {
+                        pos_offset = frames[animation.frame_index];
+                    }
+                    None => {}
                 }
             }
 
-            // Apply draw portion if specified
             if let Some(portion) = draw_portion {
                 match portion {
                     DrawPortion::Top(percentage) => {
@@ -838,8 +845,10 @@ impl Updatable for Player {
             }
             self.animate
                 .change_animation_sprites(MARIO_SPRITE_LOOKUP[1..3].to_vec());
-            self.animate
+                self.animate
+
                 .scale_animation_speed(self.velocity.x.abs() / self.max_speed as f32);
+
         } else {
             // Idle
             self.animate
@@ -868,11 +877,12 @@ impl Player {
             PlayerState::Small => {
                 self.power_state = PlayerState::Big;
                 let new_height = self.object.height * 2;
-                let animation = PlayAnimationBuilder::new(0.5, vec![self.animate.frames[self.animate.current_frame_index].clone()])
+                let animation = PlayAnimationBuilder::new(vec![self.animate.frames[self.animate.current_frame_index].clone()])
+                    .loop_for(0.5)
                     .height_frames(vec![self.object.height, new_height])
                     .build();
                 self.object.height = new_height;
-                self.animate.scale_animation_speed(0.2);
+                self.animate.scale_animation_speed(0.4);
                 self.animate.play_animation(animation);
             }
             _ => {}
@@ -1243,9 +1253,7 @@ impl Block {
     }
     fn update(&mut self) {
         self.animate.update();
-        if let Some(_animation) = self.animate.animation.clone() {
-            println!("animating block {}", self.object.pos.y)
-        }
+  
     }
     fn draw(&self, camera_x: usize, camera_y: usize) {
         self.animate.draw(
@@ -1684,16 +1692,18 @@ impl World {
                         let object_ref = self.get_the_objects_reference(&target);
                         match object_ref {
                             Some(ObjectReference::Block(index)) => {
-                                let mut block: Block = self.blocks[index].clone();
-                                let x = block.object.pos.x;
+                                let  block = self.blocks[index].borrow_mut();
+
                                 let y = block.object.pos.y;
-                                if y > self.player.object.pos.y {
+                                let player_center_x = self.player.object.pos.x + self.player.object.width as f32 / 2.0;
+                                if y >= self.player.object.pos.y 
+                                || (player_center_x < block.object.pos.x
+                                    || player_center_x > block.object.pos.x + block.object.width as f32)  {
                                     return;
                                 }
-                                let animation = PlayAnimationBuilder::new(1.0, block.animate.frames.clone()).pos_frames(
-                                    vec![Vec2::new(x, y-4.0), Vec2::new(x, y-8.0), Vec2::new(x, y-4.0)]
-                                ).build();
-
+                                let animation = PlayAnimationBuilder::new(block.animate.frames.clone()).pos_offset_frames(
+                                    vec![Vec2::new(0.0, -2.0), Vec2::new(0.0, -4.0), Vec2::new(0.0, -6.0), Vec2::new(0.0, -8.0), Vec2::new(0.0, -6.0), Vec2::new(0.0, -4.0), Vec2::new(0.0, -2.0)]).build();
+                                block.animate.scale_animation_speed(2.0);
                                 block.animate.play_animation(animation);
                             }
                             _ => {}

@@ -13,6 +13,7 @@ pub mod mario_config {
         width: 3392,
         height: 224,
     };
+
     pub const PHYSICS_FRAME_PER_SECOND: f32 = 60.0;
     pub const PHYSICS_FRAME_TIME: f32 = 1.0 / PHYSICS_FRAME_PER_SECOND;
     pub const MAX_VELOCITY_X: f32 = 2.8;

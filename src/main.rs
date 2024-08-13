@@ -1,7 +1,7 @@
 use animation::animation::{PlayAnimation, PlayAnimationBuilder};
 use image_utils::load_and_convert_texture;
 use macroquad::audio::{load_sound, play_sound, PlaySoundParams, Sound};
-use macroquad::prelude::*;
+use macroquad::{prelude::*, text};
 use mario_config::mario_config::{
     ACCELERATION, GRAVITY, JUMP_STRENGTH, MARIO_NON_MUSIC_VOLUME, MARIO_SPRITE_BLOCK_SIZE,
     MARIO_WORLD_SIZE, MAX_VELOCITY_X, PHYSICS_FRAME_PER_SECOND, PHYSICS_FRAME_TIME,
@@ -12,6 +12,7 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::Read;
 use std::any::Any;
+use std::usize;
 
 pub mod image_utils;
 pub mod mario_config;
@@ -20,7 +21,7 @@ pub mod preparation;
 use lazy_static::lazy_static;
 
 lazy_static! {
-    static ref SPRITE_TYPE_MAPPING: HashMap<&'static usize, ObjectType> = {
+    static ref SPRITE_ID_TO_TYPE: HashMap<&'static u8, ObjectType> = { // potentially rewrite as array lookup
         let mut m = HashMap::new();
         m.insert(&9, ObjectType::Block(BlockType::PowerupBlock));
         m.insert(&10, ObjectType::Block(BlockType::Block));
@@ -38,6 +39,30 @@ lazy_static! {
         m.insert(&31, ObjectType::Block(BlockType::Block));
         m
     };
+    static ref SPRITE_ID_TO_TEXTURE2D: HashMap<u8, Texture2D> = { // potentially rewrite as array lookup
+        let mut m  = HashMap::new();
+        let tilesheet = Image::from_file_with_format(
+            include_bytes!("../sprites/tilesheet.png"),
+            Some(ImageFormat::Png),
+        ).expect("Failed to load tilesheet.png");
+
+        let amount_of_tiles = tilesheet.height() / MARIO_SPRITE_BLOCK_SIZE;
+        assert!(amount_of_tiles < 256);
+        for i in 0..amount_of_tiles {
+            let mut tile_image = Image::gen_image_color(16, 16, Color::new(0.0, 0.0, 0.0, 0.0));
+            for y in 0..16 {
+                for x in 0..16 {
+                    let color = tilesheet.get_pixel(x, y + (MARIO_SPRITE_BLOCK_SIZE*i) as u32);
+                    tile_image.set_pixel(x, y, color);
+                }
+            }
+            let tile_texture = Texture2D::from_image(&tile_image);
+            tile_texture.set_filter(FilterMode::Nearest);
+            m.insert(i.try_into().expect("Tilesheet has unexpected size"), tile_texture);
+        }
+        return m;
+    };
+    
     static ref MARIO_SPRITE_LOOKUP: [Texture2D; 6] = [
         load_and_convert_texture(include_bytes!("../sprites/Mario.png"), ImageFormat::Png),
         load_and_convert_texture(
@@ -70,6 +95,7 @@ lazy_static! {
         include_bytes!("../sprites/Mushroom.png"),
         ImageFormat::Png
     ),];
+
 
 }
 enum DrawPortion {
@@ -166,6 +192,7 @@ struct SpawningObject {
     animation_progress: f32,
     animation_finish: f32,
     spawn_animation: SpawnAnimation, // only for spawning, animate is used for alive objects
+    draw_offset: Vec2,
 }
 
 
@@ -176,8 +203,9 @@ impl SpawningObject {
                 SpawningObject {
                     object: Box::new(object),
                     animation_progress: 0.0,
-                    animation_finish: 1.0,
+                    animation_finish: MARIO_SPRITE_BLOCK_SIZE as f32,
                     spawn_animation: SpawnAnimation::PowerUp,
+                    draw_offset: Vec2::new(0.0 , MARIO_SPRITE_BLOCK_SIZE as f32) // draw it where the block is then move up
                 }
             }
             _ => panic!("Spawning object with animation not implemented for object type: {:?}", object.object().object_type),
@@ -192,7 +220,7 @@ impl SpawningObject {
                 if self.animation_progress >= self.animation_finish {
                     return true;
                 } else {
-                    self.object.mut_object().pos.y -= move_by;
+                    self.draw_offset.y -= move_by;
                     return false;
                 }
             }
@@ -200,11 +228,12 @@ impl SpawningObject {
     }
     fn draw(& self, camera_x: usize, camera_y: usize) {
         match self.spawn_animation {
-
             SpawnAnimation::PowerUp => {
-
+                let object = self.object.object();
                 self.object.animate().draw(
-                    &self.object.object(),
+                    &(object.pos + self.draw_offset),
+                    object.width,
+                    object.height,
                     &self.object.velocity(),
                     camera_x,
                     camera_y,
@@ -332,7 +361,7 @@ impl CollisionHandler for EnemyBlockCollisionHandler {
         other: &SurroundingObject,
     ) -> CollisionResponse {
         let collision_response = get_collision_response(object, velocity, other);
-        if other.object.pos.y / 16.0 == object.pos.y / 16.0 {
+        if other.object.pos.y / MARIO_SPRITE_BLOCK_SIZE as f32 == object.pos.y / MARIO_SPRITE_BLOCK_SIZE as f32 {
             // if goomba is on the same level as block, reverse direction
             let new_pos = Vec2::new(collision_response.new_pos.x, collision_response.new_pos.y); // move goomba back a bit, otherwise it will get stuck
             return CollisionResponse {
@@ -544,6 +573,7 @@ struct Object {
     height: usize,
     width: usize,
     object_type: ObjectType,
+
 }
 
 impl Object {
@@ -572,7 +602,6 @@ enum PlayerState {
 #[derive(Clone)]
 struct Animate {
     frames: Vec<Texture2D>,
-
     animation: Option<PlayAnimation>,
     current_frame_index: usize,
     speed_factor: f32,
@@ -638,14 +667,14 @@ impl Animate {
         }
     }
 
-    fn draw(&self, object: &Object, velocity: &Vec2, camera_x: usize, camera_y: usize, draw_portion: Option<DrawPortion>) {
+    fn draw(&self, pos: &Vec2, width: usize, height: usize, velocity: &Vec2, camera_x: usize, camera_y: usize, draw_portion: Option<DrawPortion>) {
         if let Some(sprite_to_draw) = self.current_frame() {
             let mut src_rect = Rect::new(0.0, 0.0, sprite_to_draw.width(), sprite_to_draw.height());
             let mut dest_size = Vec2::new(
-                (object.width * SCALE_IMAGE_FACTOR) as f32,
-                (object.height * SCALE_IMAGE_FACTOR) as f32
+                (width * SCALE_IMAGE_FACTOR) as f32,
+                (height * SCALE_IMAGE_FACTOR) as f32
             );
-
+            let mut pos_offset: Vec2 = Vec2::new(0.0, 0.0);
             // Apply animation transformations
             if let Some(animation) = &self.animation {
                 if let Some(height_frames) = &animation.height_frames {
@@ -661,9 +690,7 @@ impl Animate {
                 if let Some(pos_frames) = &animation.pos_frames {
                     let index = (self.time_elapsed  / (PHYSICS_FRAME_TIME * 3.0 * self.speed_factor)) as usize % pos_frames.len();
 
-                    let pos_offset = pos_frames[index];
-                    src_rect.x += pos_offset.x;
-                    src_rect.y += pos_offset.y;
+                    pos_offset = pos_frames[index];
                 }
             }
 
@@ -697,8 +724,8 @@ impl Animate {
 
             draw_texture_ex(
                 sprite_to_draw,
-                (object.pos.x - camera_x as f32) * SCALE_IMAGE_FACTOR as f32,
-                (object.pos.y - camera_y as f32) * SCALE_IMAGE_FACTOR as f32,
+                (pos.x + pos_offset.x - camera_x as f32) * SCALE_IMAGE_FACTOR as f32,
+                (pos.y + pos_offset.y - camera_y as f32) * SCALE_IMAGE_FACTOR as f32,
                 WHITE,
                 DrawTextureParams {
                     dest_size: Some(dest_size),
@@ -902,7 +929,9 @@ impl Player {
 
     fn draw(&self, camera_x: usize, camera_y: usize) {
         self.animate.draw(
-            &self.object,
+            &self.object.pos,
+            self.object.width,
+            self.object.height,
             &self.velocity,
             camera_x,
             camera_y,
@@ -1010,7 +1039,9 @@ impl Goomba {
     }
     fn draw(&self, camera_x: usize, camera_y: usize) {
         self.animate.draw(
-            &self.object,
+            &self.object.pos,
+            self.object.width,
+            self.object.height,
             &self.velocity,
             camera_x,
             camera_y,
@@ -1068,7 +1099,7 @@ enum GameState {
     GameOver,
     Frozen(f32),
 }
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 enum ObjectReference {
     Block(usize),
     Enemy(usize), // Index into the self.enemies vector
@@ -1165,7 +1196,9 @@ impl PowerUp {
     }
     fn draw(&self, camera_x: usize, camera_y: usize) {
         self.animate.draw(
-            &self.object,
+            &self.object.pos,
+            self.object.width,
+            self.object.height,
             &self.velocity,
             camera_x,
             camera_y,
@@ -1173,37 +1206,52 @@ impl PowerUp {
         )
     }
 }
+#[derive(Clone)]
 struct Block {
     object: Object,
+    texture_id: u8,
     animate: Animate,
 }
 impl Block {
-    fn new_block(x: usize, y: usize) -> Block {
+    fn new_block(x: usize, y: usize, texture_id: u8) -> Block {
         let mut block = Block {
             object: Object::new(x, y, ObjectType::Block(BlockType::Block)),
             animate: Animate::new(1.0),
+            texture_id
         };
         block
             .animate
-            .change_animation_sprites(vec![MARIO_SPRITE_LOOKUP[0].clone()]);
+            .change_animation_sprites(vec![SPRITE_ID_TO_TEXTURE2D.get(&texture_id).expect("Invalid texture ID for Block").clone()]);
         block
     }
-    fn new_powerup_block(x: usize, y: usize) -> Block {
+    fn new_powerup_block(x: usize, y: usize, texture_id: u8) -> Block {
         let mut block = Block {
             object: Object::new(x, y, ObjectType::Block(BlockType::PowerupBlock)),
             animate: Animate::new(1.0),
+            texture_id: texture_id
         };
         block
             .animate
-            .change_animation_sprites(vec![MARIO_SPRITE_LOOKUP[0].clone()]);
+            .change_animation_sprites(vec![SPRITE_ID_TO_TEXTURE2D.get(&block.texture_id).expect("Invalid texture ID for Block").clone()]);
         block
+    }
+    fn transform_into_regular_block(&mut self) {
+        self.object.object_type = ObjectType::Block(BlockType::Block);
+        self.
+        animate
+        .change_animation_sprites(vec![SPRITE_ID_TO_TEXTURE2D.get(&10).expect("Invalid texture ID for Block").clone()]);
     }
     fn update(&mut self) {
         self.animate.update();
+        if let Some(_animation) = self.animate.animation.clone() {
+            println!("animating block {}", self.object.pos.y)
+        }
     }
     fn draw(&self, camera_x: usize, camera_y: usize) {
         self.animate.draw(
-            &self.object,
+            &self.object.pos,
+            self.object.width,
+            self.object.height,
             &Vec2::new(0.0, 0.0),
             camera_x,
             camera_y,
@@ -1223,8 +1271,7 @@ struct World {
     camera: Camera,
     game_state: GameState,
     level_texture: Option<Texture2D>,
-    level_render_target: Option<RenderTarget>, // to update level texture, if using index buffer + tilesheet + shader then this is not needed
-    tilesheet: Option<Texture2D>, // to update level texture, if using index buffer + tilesheet + shader then this would not be needed as it would be in GPU
+
     sounds: Option<(Sound, Sound, Sound)>,
 
 }
@@ -1245,8 +1292,8 @@ impl World {
             camera: Camera::new(600, height),
             game_state: GameState::Playing,
             level_texture: None,
-            level_render_target: None,
-            tilesheet: None,
+
+
             sounds: None,
         }
     }
@@ -1265,12 +1312,12 @@ impl World {
         let tilesheet = load_texture("sprites/tilesheet.png")
             .await
             .expect("Failed to load tilesheet");
-        tilesheet.set_filter(FilterMode::Nearest);
+        
         let mut render_target_camera =
             Camera2D::from_display_rect(Rect::new(0., 0., self.width as f32, self.height as f32));
 
         let level_render_target = render_target(self.width as u32, self.height as u32);
-        self.level_render_target = Some(level_render_target.clone());
+
         render_target_camera.render_target = Some(level_render_target);
 
 
@@ -1282,25 +1329,34 @@ impl World {
                 let y = (index as u32 / (self.width / MARIO_SPRITE_BLOCK_SIZE as usize) as u32)
                     * MARIO_SPRITE_BLOCK_SIZE as u32;
 
-                let sprite_y = (*tile as u32 * MARIO_SPRITE_BLOCK_SIZE as u32) as f32;
 
-                draw_texture_ex(
-                    &tilesheet,
-                    x as f32,
-                    y as f32,
-                    WHITE,
-                    DrawTextureParams {
-                        source: Some(Rect {
-                            x: 0.0,
-                            y: sprite_y,
-                            w: MARIO_SPRITE_BLOCK_SIZE as f32,
-                            h: MARIO_SPRITE_BLOCK_SIZE as f32,
-                        }),
-                        ..Default::default()
-                    },
-                );
-                if let Some(object_type) = SPRITE_TYPE_MAPPING.get(&tile) {
-                    self.add_object(Object::new(x as usize, y as usize, object_type.clone()));
+                if let None = SPRITE_ID_TO_TYPE.get(&tile) { // only draw non Blocks
+                    let tile_texture = SPRITE_ID_TO_TEXTURE2D.get(&tile).expect("Couldn't find sprite id in SPRITE_ID_TO_TEXTURE");
+                    draw_texture_ex( 
+                        &tile_texture,
+                        x as f32,
+                        y as f32,
+                        WHITE,
+                        DrawTextureParams::default()
+                    );
+                }
+                else if let Some(object_type) = SPRITE_ID_TO_TYPE.get(&tile) {
+                    draw_texture_ex( // draw background behind any Block
+                        &tilesheet,
+                        x as f32,
+                        y as f32,
+                        WHITE,
+                        DrawTextureParams {
+                            source: Some(Rect {
+                                x: 0.0,
+                                y: 0.0,
+                                w: MARIO_SPRITE_BLOCK_SIZE as f32,
+                                h: MARIO_SPRITE_BLOCK_SIZE as f32,
+                            }),
+                            ..Default::default()
+                        },
+                    );
+                    self.add_block(Object::new(x as usize, y as usize, object_type.clone()), *tile);
                 }
             }
         }
@@ -1311,7 +1367,7 @@ impl World {
 
         let render_texture = render_target_camera.render_target.unwrap().texture;
         self.level_texture = Some(render_texture); // to draw in one call, while keeping compressed json instead of loading a .png
-        self.tilesheet = Some(tilesheet);
+
     }
 
     async fn load_sounds(&mut self){
@@ -1348,19 +1404,18 @@ impl World {
         self.add_object(Object::new(876, 176, ObjectType::Enemy(EnemyType::Goomba)));
         self.add_object(Object::new(2648, 176, ObjectType::Enemy(EnemyType::Goomba)));
     }
-    fn spawn_object(&mut self, object: Object) {
+    fn spawn_powerup(&mut self, object: Object) {
         match object.object_type {
             ObjectType::Powerup => {
                 let powerup = PowerUp::new(object.pos.x as usize, object.pos.y as usize);
                 self.spawning_objects.push(SpawningObject::new(powerup));
             }
-
-            _ => self.add_object(object),
+            _ => panic!("Can only spawn powerups with animation"),
         }
     }
     fn add_object(&mut self, object: Object) {
-        let x = (object.pos.x / 16.0) as usize;
-        let y = (object.pos.y / 16.0) as usize;
+        let x =  (object.pos.x / MARIO_SPRITE_BLOCK_SIZE as f32).round() as usize;
+        let y =  (object.pos.y / MARIO_SPRITE_BLOCK_SIZE as f32).round() as usize;
         if y > self.objects.len() - 1 || x > self.objects[y].len() - 1 {
             return;
         }
@@ -1374,58 +1429,48 @@ impl World {
                 self.powerups
                     .push(PowerUp::new(pos.x as usize, pos.y as usize));
             }
-            ObjectType::Block(BlockType::Block) => {
-                self.blocks.push(Block::new_block(pos.x as usize, pos.y as usize));
-            }
-            ObjectType::Block(BlockType::PowerupBlock) => {
-                self.blocks.push(Block::new_powerup_block(pos.x as usize, pos.y as usize));
-            }
             _ => {}
         }
         if let ObjectReference::None = self.objects[y][x] {
             self.objects[y][x] = match object.object_type {
-                ObjectType::Block(_) => ObjectReference::Block(self.blocks.len() - 1),
                 ObjectType::Enemy(_) => ObjectReference::Enemy(self.enemies.len() - 1),
                 ObjectType::Player => ObjectReference::Player,
                 ObjectType::Powerup => ObjectReference::Powerup(self.powerups.len()),
+                _ => panic!("Trying to add block as regular object!")
             };
         } else {
+            println!("Adding object at x {} {}", x*MARIO_SPRITE_BLOCK_SIZE, y*MARIO_SPRITE_BLOCK_SIZE);
             panic!("Tried to add object where: Object already exists");
         }
     }
-    fn update_object_references(&mut self, object: Object) {
-        let x = (object.pos.x / 16.0) as usize;
-        let y = (object.pos.y / 16.0) as usize;
+    fn add_block(&mut self, object: Object, texture_id: u8) {
+        assert!(match object.object_type {
+            ObjectType::Block(_) => {true},
+             _ => {false}
+            });
+        let x = (object.pos.x / MARIO_SPRITE_BLOCK_SIZE as f32).round() as usize;
+        let y = (object.pos.y / MARIO_SPRITE_BLOCK_SIZE as f32).round() as usize;
         if y > self.objects.len() - 1 || x > self.objects[y].len() - 1 {
-            return;
-        }
+                return;
+            }
         let pos = object.pos;
         match object.object_type {
-            ObjectType::Enemy(EnemyType::Goomba) => {
-                self.enemies
-                    .push(Goomba::new(pos.x as usize, pos.y as usize, 1));
-            }
-            ObjectType::Powerup => {
-                self.powerups
-                    .push(PowerUp::new(pos.x as usize, pos.y as usize));
-            }
             ObjectType::Block(BlockType::Block) => {
-                self.blocks.push(Block::new_block(pos.x as usize, pos.y as usize));
+                self.blocks.push(Block::new_block(pos.x as usize, pos.y as usize, texture_id))
             }
             ObjectType::Block(BlockType::PowerupBlock) => {
-                self.blocks.push(Block::new_powerup_block(pos.x as usize, pos.y as usize));
+                self.blocks.push(Block::new_powerup_block(pos.x as usize, pos.y as usize, texture_id))
             }
-            ObjectType::Player => {
-                self.player = Player::new(pos.x as usize, pos.y as usize, MAX_VELOCITY_X);
-            }
+            _ => {}
         }
-        self.objects[y][x] = match object.object_type {
-                ObjectType::Block(_) => ObjectReference::Block(self.blocks.len() - 1),
-            ObjectType::Enemy(_) => ObjectReference::Enemy(self.enemies.len() - 1),
-            ObjectType::Player => ObjectReference::Player,
-            ObjectType::Powerup => ObjectReference::Block(self.blocks.len() - 1),
-        };
+        if let ObjectReference::None = self.objects[y][x] {
+            self.objects[y][x] = ObjectReference::Block(self.blocks.len() - 1);
+        }
+        else {
+            panic!("Tried to add object where: Object already exists");
+        }
     }
+
     fn handle_input(&mut self) {
         if is_key_down(KeyCode::Right) || is_key_down(KeyCode::D) {
             self.player
@@ -1462,9 +1507,8 @@ impl World {
         directions
             .iter()
             .filter_map(|(dy, dx)| {
-                let new_y = (object.pos.y / 16.0).round() as isize + *dy;
-                let new_x = (object.pos.x / 16.0).round() as isize + *dx;
-    
+                let new_x = (object.pos.x / MARIO_SPRITE_BLOCK_SIZE as f32).round() as isize + *dx;
+                let new_y = (object.pos.y / MARIO_SPRITE_BLOCK_SIZE as f32).round() as isize + *dy;
                 if new_y >= 0
                     && new_y < objects.len() as isize
                     && new_x >= 0
@@ -1512,6 +1556,24 @@ impl World {
             })
             .collect()
     }
+    fn get_the_objects_reference(&self, object: &Object) -> Option<ObjectReference> {
+        let obj_idx_x: usize = (object.pos.x / MARIO_SPRITE_BLOCK_SIZE as f32).round() as usize;
+        let obj_idx_y = (object.pos.y / MARIO_SPRITE_BLOCK_SIZE as f32).round() as usize;
+        if obj_idx_y < self.objects.len() - 1 && obj_idx_x < self.objects[obj_idx_y].len() -1 {
+            return Some(
+                self.objects[obj_idx_y][obj_idx_x].clone()
+            )
+        } else {
+            return None;
+        }
+    } 
+    fn clear_the_objects_reference(&mut self, object: &Object) {
+        let obj_idx_x: usize = (object.pos.x / MARIO_SPRITE_BLOCK_SIZE as f32).round() as usize;
+        let obj_idx_y = (object.pos.y / MARIO_SPRITE_BLOCK_SIZE as f32).round() as usize;
+        if obj_idx_y < self.objects.len() - 1 && obj_idx_x < self.objects[obj_idx_y].len() -1 {
+            self.objects[obj_idx_y][obj_idx_x] = ObjectReference::None;
+        }
+    }
     fn handle_game_event(&mut self, game_event: GameEvent) {
         match game_event.event {
             GameEventType::GameWon => {
@@ -1522,10 +1584,8 @@ impl World {
             }
             GameEventType::Kill => {
                 if let Some(target) = game_event.target {
-                    let obj_idx_x: usize = (target.pos.x / 16.0).round() as usize;
-                    let obj_idx_y = (target.pos.y / 16.0).round() as usize;
-                    self.enemies.retain(|enemy| enemy.object != target);
-                    self.objects[obj_idx_y][obj_idx_x] = ObjectReference::None;
+                    self.enemies.retain(|enemy| enemy.object != target); // can do more efficient cleaning by swap removal and index from Object reference
+                    self.clear_the_objects_reference(&target);
                 }
             }
             GameEventType::PlayerHit => { // handled here because it can lead to game over, so we will handle powerup state in general here
@@ -1552,9 +1612,7 @@ impl World {
             GameEventType::PlayerPowerUp => {
                 self.player.power_up();
                 if let Some(target) = game_event.target {
-                    let obj_idx_x: usize = (target.pos.x / 16.0).round() as usize;
-                    let obj_idx_y = (target.pos.y / 16.0).round() as usize;
-                    self.objects[obj_idx_y][obj_idx_x] = ObjectReference::None;
+                    self.clear_the_objects_reference(&target);
                     self.powerups.retain(|powerup| powerup.object != target);
                 }
                 play_sound(
@@ -1598,18 +1656,20 @@ impl World {
                 if let Some(target) = game_event.target {
                     match target.object_type {
                     ObjectType::Block(BlockType::PowerupBlock) => {
-                        let obj_idx_x: usize = (target.pos.x / 16.0).round() as usize;
-                        let obj_idx_y = (target.pos.y / 16.0).round() as usize;
-                        self.objects[obj_idx_y][obj_idx_x] = ObjectReference::None;
-                        self.update_object_references(Object::new(
+                        let object_ref = self.get_the_objects_reference(&target);
+                            match object_ref {
+                                Some(ObjectReference::Block(index)) => { 
+                                    let block = &mut self.blocks[index];
+                                    block.transform_into_regular_block(); 
+
+
+                                }
+                                _ => {}
+                            }
+                       
+                        self.spawn_powerup(Object::new(
                             target.pos.x as usize,
-                            target.pos.y as usize,
-                            ObjectType::Block(BlockType::Block),
-                        ));
-                        self.update_level_texture(10, obj_idx_x, obj_idx_y);
-                        self.spawn_object(Object::new(
-                            target.pos.x as usize,
-                            target.pos.y as usize,
+                            target.pos.y as usize- (MARIO_SPRITE_BLOCK_SIZE),
                             ObjectType::Powerup,
                         ));
 
@@ -1618,7 +1678,29 @@ impl World {
                 }
             }
             }
-            _ => {  }
+            GameEventType::PlayerHitBlock => {
+                if let Some(target) = game_event.target {
+                    if target.object_type == ObjectType::Block(BlockType::Block) {
+                        let object_ref = self.get_the_objects_reference(&target);
+                        match object_ref {
+                            Some(ObjectReference::Block(index)) => {
+                                let mut block: Block = self.blocks[index].clone();
+                                let x = block.object.pos.x;
+                                let y = block.object.pos.y;
+                                if y > self.player.object.pos.y {
+                                    return;
+                                }
+                                let animation = PlayAnimationBuilder::new(1.0, block.animate.frames.clone()).pos_frames(
+                                    vec![Vec2::new(x, y-4.0), Vec2::new(x, y-8.0), Vec2::new(x, y-4.0)]
+                                ).build();
+
+                                block.animate.play_animation(animation);
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
         }
     }
     fn update_spawning_objects(&mut self ) {
@@ -1634,6 +1716,7 @@ impl World {
             match spawned_object.object.object().object_type {
                 ObjectType::Powerup => {
                     let powerup = spawned_object.object.as_any().downcast_ref::<PowerUp>().expect("Failed to downcast powerup");
+
                     self.add_object(powerup.object.clone()); 
                 }
                 _ => {}
@@ -1663,14 +1746,14 @@ impl World {
         1
             );
 
-            let old_x = (enemy.object.pos.x / 16.0).round() as usize;
-            let old_y = (enemy.object.pos.y / 16.0).round() as usize;
+            let old_x = (enemy.object.pos.x / MARIO_SPRITE_BLOCK_SIZE as f32).round() as usize;
+            let old_y = (enemy.object.pos.y / MARIO_SPRITE_BLOCK_SIZE as f32).round() as usize;
 
             let game_event = enemy.update(&surrounding_objects, WorldBounds { min_x: 0, max_x: self.width, max_y: self.height });
             vec_of_game_events.push(game_event);
 
-            let new_x = (enemy.object.pos.x / 16.0).round() as usize;
-            let new_y = (enemy.object.pos.y / 16.0).round() as usize;
+            let new_x = (enemy.object.pos.x / MARIO_SPRITE_BLOCK_SIZE as f32).round() as usize;
+            let new_y = (enemy.object.pos.y / MARIO_SPRITE_BLOCK_SIZE as f32).round() as usize;
 
             if old_x == new_x && old_y == new_y {
                 continue;
@@ -1707,14 +1790,14 @@ impl World {
                 1,
             );
 
-            let old_x = (powerup.object.pos.x / 16.0).round() as usize;
-            let old_y = (powerup.object.pos.y / 16.0).round() as usize;
+            let old_x = (powerup.object.pos.x / MARIO_SPRITE_BLOCK_SIZE as f32).round() as usize;
+            let old_y = (powerup.object.pos.y / MARIO_SPRITE_BLOCK_SIZE as f32).round() as usize;
 
             let game_event = powerup.update(&surrounding_objects, WorldBounds { min_x: 0, max_x: self.width, max_y: self.height });
             vec_of_game_events.push(game_event);
 
-            let new_x = (powerup.object.pos.x / 16.0).round() as usize;
-            let new_y = (powerup.object.pos.y / 16.0).round() as usize;
+            let new_x = (powerup.object.pos.x / MARIO_SPRITE_BLOCK_SIZE as f32).round() as usize;
+            let new_y = (powerup.object.pos.y / MARIO_SPRITE_BLOCK_SIZE as f32).round() as usize;
 
             if old_x == new_x && old_y == new_y {
                 continue;
@@ -1728,8 +1811,8 @@ impl World {
             }
             self.objects[new_y][new_x] = ObjectReference::Powerup(i);
         }
-        let player_old_x = (self.player.object.pos.x / 16.0).round() as usize;
-        let player_old_y = (self.player.object.pos.y / 16.0).round() as usize;
+        let player_old_x = (self.player.object.pos.x / MARIO_SPRITE_BLOCK_SIZE as f32).round() as usize;
+        let player_old_y = (self.player.object.pos.y / MARIO_SPRITE_BLOCK_SIZE as f32).round() as usize;
         self.objects[player_old_y][player_old_x] = ObjectReference::None;
         let player_surrounding_objects: Vec<SurroundingObject> = Self::get_surrounding_objects(
             &self.objects,
@@ -1762,8 +1845,8 @@ impl World {
                 }
             }
         }
-        let player_new_x = (self.player.object.pos.x / 16.0).round() as usize;
-        let player_new_y = (self.player.object.pos.y / 16.0).round() as usize;
+        let player_new_x = (self.player.object.pos.x / MARIO_SPRITE_BLOCK_SIZE as f32).round() as usize;
+        let player_new_y = (self.player.object.pos.y / MARIO_SPRITE_BLOCK_SIZE as f32).round() as usize;
 
         if player_new_y >= self.objects.len() || player_new_x >= self.objects[player_new_y].len() {
             return;
@@ -1776,35 +1859,6 @@ impl World {
         );
     }
 
-    fn update_level_texture(&mut self, sprite_id: usize, update_x: usize, update_y: usize) {
-        if let (Some(render_target), Some(tilesheet)) = (&self.level_render_target, &self.tilesheet) {
-            let mut render_target_camera = Camera2D::from_display_rect(Rect::new(0., 0., self.width as f32, self.height as f32));
-            render_target_camera.render_target = Some(render_target.clone());
-            set_camera(&render_target_camera);
-            let sprite_y = (sprite_id * MARIO_SPRITE_BLOCK_SIZE) as f32;
-
-            draw_texture_ex(
-                tilesheet,
-                update_x as f32 * MARIO_SPRITE_BLOCK_SIZE as f32,
-                update_y as f32 * MARIO_SPRITE_BLOCK_SIZE as f32,
-                WHITE,
-                DrawTextureParams {
-                    source: Some(Rect {
-                        x: 0.0,
-                        y: sprite_y,
-                        w: MARIO_SPRITE_BLOCK_SIZE as f32,
-                        h: MARIO_SPRITE_BLOCK_SIZE as f32,
-                    }),
-                    ..Default::default()
-                },
-            );
-    
-            set_default_camera();
-    
-            // Update the level texture
-            self.level_texture = Some(render_target.texture.clone());
-        }
-    }
     fn draw(&self) {
         match self.game_state {
             GameState::GameOver => {

@@ -425,6 +425,7 @@ trait Updatable: 'static{
             self.mut_velocity().x =
                 (self.velocity().x.abs() - 2.0 * PHYSICS_FRAME_TIME) * self.velocity().x.signum();
         }
+
     }
     fn update_animation(&mut self) {}
     fn get_collision_handler(&self, object_type: ObjectType) -> Box<dyn CollisionHandler>; // this could be a trait enum?
@@ -442,7 +443,7 @@ trait Updatable: 'static{
                     && obj.object.pos.x < self_center_x
                     && obj.object.pos.x + obj.object.width as f32 > self_center_x
             });
-       
+
         if block_below.is_none() {
             self.apply_gravity();
             self.set_grounded(false);
@@ -882,7 +883,7 @@ impl Player {
                     .height_frames(vec![self.object.height, new_height])
                     .build();
                 self.object.height = new_height;
-                self.animate.scale_animation_speed(0.4);
+                self.animate.scale_animation_speed(0.8);
                 self.animate.play_animation(animation);
             }
             _ => {}

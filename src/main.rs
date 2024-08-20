@@ -97,9 +97,10 @@ lazy_static! {
 
 
 }
+#[allow(dead_code)]
 enum DrawPortion {
     Top(f32),
-    Bottom(f32),
+    Bottom(f32), 
     Left(f32),
     Right(f32),
 }

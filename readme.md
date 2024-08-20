@@ -22,14 +22,14 @@ cargo run --release
 
 ### Controls
 
-- **Arrow Keys** or **WASD**: Move the character left, right, jump, and crouch.
+- **Arrow Keys** or **WASD** + **Spacebar**: Move the character left, right, jump.
 
 ## Known Limitations
 
-- **Animation Issues**: The animation system has some bugs when finishing the game.
-- **Collision System**: Rarely, collisions can be finicky due to diagonal checking when updating the x velocity.
-- **Score System**: Basic scoring is implemented but needs refinement.
-- **Level Data**: The level data currently lacks information about "Powerup Blocks" (any block with `?`). Powerups and coins are not fully implemented.
+- **End of Game**: The animation system has no animation for end of the game, but they can be easily added.
+- **Collision System**: Rarely, collisions can be finicky due to diagonal checking sometimes updating x velocity.
+- **Score System**: No score system is implemented.
+- **Level Data**: The level data currently lacks information about "Powerup Blocks" (any block with `?`). So every block of this kind is a powerup. Coins are not implemented at all.
 
 ## License
 

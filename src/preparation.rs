@@ -25,7 +25,7 @@ pub fn main() {
     let mut level_data = Vec::new();
 
     create_dir_all("leveldata").expect("Failed to create directory");
-
+    
     for y in (0..img_height).step_by(MARIO_SPRITE_BLOCK_SIZE) {
         for x in (0..img_width).step_by(MARIO_SPRITE_BLOCK_SIZE) {
             let tile = img
@@ -38,17 +38,18 @@ pub fn main() {
                 .to_image();
             let mut found = false;
             let mut sprite_id: u8 = 0;
-
+            
             for (i, existing_tile) in tiles_map.iter().enumerate() {
+                assert!(tiles_map.len() < 256);
                 if tiles_equal(&tile, existing_tile) {
                     found = true;
-                    sprite_id = i as u8; // Convert usize to u8
+                    sprite_id = i as u8;
                     break;
                 }
             }
 
             if !found {
-                sprite_id = tiles_map.len() as u8; // Convert usize to u8
+                sprite_id = tiles_map.len() as u8;
                 tiles_map.push(tile.clone());
             }
 
